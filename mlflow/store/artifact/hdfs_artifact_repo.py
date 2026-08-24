@@ -1,6 +1,7 @@
 import os
 import posixpath
 import urllib.parse
+from collections.abc import Iterator
 from contextlib import contextmanager
 
 try:
@@ -26,13 +27,18 @@ class HdfsArtifactRepository(ArtifactRepository):
     together with the RestStore.
     """
 
+    scheme: str
+    host: str | None
+    port: int | None
+    path: str
+
     def __init__(
         self, artifact_uri: str, tracking_uri: str | None = None, registry_uri: str | None = None
     ) -> None:
         super().__init__(artifact_uri, tracking_uri, registry_uri)
         self.scheme, self.host, self.port, self.path = _resolve_connection_params(artifact_uri)
 
-    def log_artifact(self, local_file, artifact_path=None):
+    def log_artifact(self, local_file: str, artifact_path: str | None = None) -> None:
         """
         Log artifact in hdfs.
 
@@ -49,7 +55,7 @@ class HdfsArtifactRepository(ArtifactRepository):
                 with hdfs.open_output_stream(destination_path) as destination:
                     destination.write(source.read())
 
-    def log_artifacts(self, local_dir, artifact_path=None):
+    def log_artifacts(self, local_dir: str, artifact_path: str | None = None) -> None:
         """
         Log artifacts in hdfs.
         Missing remote sub-directories will be created if needed.
@@ -83,7 +89,7 @@ class HdfsArtifactRepository(ArtifactRepository):
                         with hdfs.open_output_stream(destination_path) as destination:
                             destination.write(source.read())
 
-    def list_artifacts(self, path=None):
+    def list_artifacts(self, path: str | None = None) -> list[FileInfo]:
         """
         Lists files and directories under artifacts directory for the current run_id.
         (self.path contains the base path - hdfs:/some/path/run_id/artifacts)
@@ -134,7 +140,7 @@ class HdfsArtifactRepository(ArtifactRepository):
                 with open(local_path, "wb") as destination:
                     destination.write(source.read())
 
-    def delete_artifacts(self, artifact_path=None):
+    def delete_artifacts(self, artifact_path: str | None = None) -> None:
         path = posixpath.join(self.path, artifact_path) if artifact_path else self.path
         with hdfs_system(scheme=self.scheme, host=self.host, port=self.port) as hdfs:
             file_info = hdfs.get_file_info(path)
@@ -145,7 +151,7 @@ class HdfsArtifactRepository(ArtifactRepository):
 
 
 @contextmanager
-def hdfs_system(scheme, host, port):
+def hdfs_system(scheme: str, host: str | None, port: int | None) -> Iterator["HadoopFileSystem"]:
     """
     hdfs system context - Attempt to establish the connection to hdfs
     and yields HadoopFileSystem

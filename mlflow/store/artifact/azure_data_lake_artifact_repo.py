@@ -2,6 +2,8 @@ import os
 import posixpath
 import re
 import urllib.parse
+from collections.abc import Callable
+from typing import Any
 
 import requests
 
@@ -83,17 +85,26 @@ class AzureDataLakeArtifactRepository(CloudArtifactRepository):
             to use to authenticate to storage
     """
 
+    # Populated by `_parse_credentials`.
+    sas_token: str
+    credential: Any
+    fs_client: Any
+    domain_suffix: str
+    base_data_lake_directory: str
+    account_name: str
+    container: str
+
     def __init__(
         self,
         artifact_uri: str,
-        credential=None,
-        credential_refresh_def=None,
+        credential: Any = None,
+        credential_refresh_def: Callable[[], dict[str, Any]] | None = None,
         tracking_uri: str | None = None,
         registry_uri: str | None = None,
     ) -> None:
         super().__init__(artifact_uri, tracking_uri, registry_uri)
         _DEFAULT_TIMEOUT = 600  # 10 minutes
-        self.write_timeout = MLFLOW_ARTIFACT_UPLOAD_DOWNLOAD_TIMEOUT.get() or _DEFAULT_TIMEOUT
+        self.write_timeout: int = MLFLOW_ARTIFACT_UPLOAD_DOWNLOAD_TIMEOUT.get() or _DEFAULT_TIMEOUT
         self._parse_credentials(credential)
         self._credential_refresh_def = credential_refresh_def
 
@@ -126,7 +137,7 @@ class AzureDataLakeArtifactRepository(CloudArtifactRepository):
         self._parse_credentials(new_creds["credential"])
         return self.fs_client
 
-    def log_artifact(self, local_file, artifact_path=None):
+    def log_artifact(self, local_file: str, artifact_path: str | None = None) -> None:
         dest_path = self.base_data_lake_directory
         if artifact_path:
             dest_path = posixpath.join(dest_path, artifact_path)
@@ -146,7 +157,7 @@ class AzureDataLakeArtifactRepository(CloudArtifactRepository):
             try_func=try_func, creds_func=self._refresh_credentials, orig_creds=self.fs_client
         )
 
-    def list_artifacts(self, path=None):
+    def list_artifacts(self, path: str | None = None) -> list[FileInfo]:
         directory_to_list = self.base_data_lake_directory
         if path:
             directory_to_list = posixpath.join(directory_to_list, path)
@@ -186,7 +197,7 @@ class AzureDataLakeArtifactRepository(CloudArtifactRepository):
             try_func=try_func, creds_func=self._refresh_credentials, orig_creds=self.fs_client
         )
 
-    def delete_artifacts(self, artifact_path=None):
+    def delete_artifacts(self, artifact_path: str | None = None) -> None:
         raise NotImplementedError("This artifact repository does not support deleting artifacts")
 
     def _upload_to_cloud(self, cloud_credential_info, src_file_path, artifact_file_path):
@@ -204,7 +215,9 @@ class AzureDataLakeArtifactRepository(CloudArtifactRepository):
         try:
             func(**kwargs)
         except requests.HTTPError as e:
-            if e.response.status_code in [403]:
+            # HTTPError raised by raise_for_status always carries its response, but
+            # requests types it as Optional.
+            if e.response.status_code in [403]:  # type: ignore[union-attr]
                 new_credentials = self._get_write_credential_infos([artifact_file_path])[0]
                 kwargs["sas_url"] = new_credentials.signed_uri
                 func(**kwargs)
@@ -263,7 +276,10 @@ class AzureDataLakeArtifactRepository(CloudArtifactRepository):
                     headers=headers,
                 )
         except Exception as err:
-            raise MlflowException(err)
+            # Deliberate: the exception object itself is passed as the message and is
+            # stringified when rendered, so the str-only annotation of MlflowException
+            # is not honored here.
+            raise MlflowException(err)  # type: ignore[arg-type]
 
     def _get_presigned_uri(self, artifact_file_path):
         """

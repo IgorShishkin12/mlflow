@@ -41,7 +41,7 @@ class RunsArtifactRepository(ArtifactRepository):
         )
 
     @staticmethod
-    def is_runs_uri(uri):
+    def is_runs_uri(uri: str) -> bool:
         return urllib.parse.urlparse(uri).scheme == "runs"
 
     @staticmethod
@@ -56,12 +56,13 @@ class RunsArtifactRepository(ArtifactRepository):
             tracking_uri=databricks_profile_uri or tracking_uri,
         )
         assert not RunsArtifactRepository.is_runs_uri(uri)  # avoid an infinite loop
-        return add_databricks_profile_info_to_artifact_uri(
+        underlying_uri: str = add_databricks_profile_info_to_artifact_uri(
             artifact_uri=uri, databricks_profile_uri=databricks_profile_uri or tracking_uri
         )
+        return underlying_uri
 
     @staticmethod
-    def parse_runs_uri(run_uri):
+    def parse_runs_uri(run_uri: str) -> tuple[str, str | None]:
         parsed = urllib.parse.urlparse(run_uri)
         if parsed.scheme != "runs":
             raise MlflowException(
@@ -90,7 +91,7 @@ class RunsArtifactRepository(ArtifactRepository):
 
         return run_id, artifact_path
 
-    def log_artifact(self, local_file, artifact_path=None):
+    def log_artifact(self, local_file: str, artifact_path: str | None = None) -> None:
         """
         Log a local file as an artifact, optionally taking an ``artifact_path`` to place it in
         within the run's artifacts. Run artifacts can be organized into directories, so you can
@@ -103,7 +104,7 @@ class RunsArtifactRepository(ArtifactRepository):
         """
         self.repo.log_artifact(local_file, artifact_path)
 
-    def log_artifacts(self, local_dir, artifact_path=None):
+    def log_artifacts(self, local_dir: str, artifact_path: str | None = None) -> None:
         """
         Log the files in the specified local directory as artifacts, optionally taking
         an ``artifact_path`` to place them in within the run's artifacts.
@@ -267,5 +268,5 @@ class RunsArtifactRepository(ArtifactRepository):
         """
         self.repo._download_file(remote_file_path, local_path)
 
-    def delete_artifacts(self, artifact_path=None):
+    def delete_artifacts(self, artifact_path: str | None = None) -> None:
         self.repo.delete_artifacts(artifact_path)

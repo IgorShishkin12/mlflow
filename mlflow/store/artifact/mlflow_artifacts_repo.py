@@ -3,6 +3,7 @@ import os
 import re
 import threading
 from http import HTTPStatus
+from typing import Any, cast
 from urllib.parse import urlparse, urlunparse
 
 from requests import HTTPError
@@ -85,7 +86,7 @@ class MlflowArtifactsRepository(HttpArtifactRepository):
         self._server_capabilities_lock = threading.Lock()
 
     @classmethod
-    def resolve_uri(cls, artifact_uri, tracking_uri):
+    def resolve_uri(cls, artifact_uri: str, tracking_uri: str) -> str:
         base_url = "/api/2.0/mlflow-artifacts/artifacts"
 
         track_parse = urlparse(tracking_uri)
@@ -146,7 +147,9 @@ class MlflowArtifactsRepository(HttpArtifactRepository):
             try:
                 response = fetch_server_info(self._artifact_server_host_creds)
                 if response.status_code == 200:
-                    data = response.data
+                    # A 200 ServerInfoResponse always carries the parsed JSON payload;
+                    # ``data`` is None only for non-200 responses (see utils/server_info.py).
+                    data = cast("dict[str, Any]", response.data)
                     self._server_capabilities = {
                         SERVER_INFO_MULTIPART_UPLOADS_ENABLED: data.get(
                             SERVER_INFO_MULTIPART_UPLOADS_ENABLED, False

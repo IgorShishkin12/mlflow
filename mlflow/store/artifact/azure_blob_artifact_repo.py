@@ -5,11 +5,13 @@ import posixpath
 import re
 import urllib.parse
 from datetime import timezone
+from typing import Any, cast
 
 from mlflow.entities import FileInfo
 from mlflow.entities.multipart_upload import (
     CreateMultipartUploadResponse,
     MultipartUploadCredential,
+    MultipartUploadPart,
 )
 from mlflow.environment_variables import MLFLOW_ARTIFACT_UPLOAD_DOWNLOAD_TIMEOUT
 from mlflow.exceptions import MlflowException
@@ -51,18 +53,18 @@ class AzureBlobArtifactRepository(ArtifactRepository, MultipartUploadMixin):
     def __init__(
         self,
         artifact_uri: str,
-        client=None,
+        client: Any = None,
         tracking_uri: str | None = None,
         registry_uri: str | None = None,
     ) -> None:
         super().__init__(artifact_uri, tracking_uri, registry_uri)
 
         _DEFAULT_TIMEOUT = 600  # 10 minutes
-        self.write_timeout = MLFLOW_ARTIFACT_UPLOAD_DOWNLOAD_TIMEOUT.get() or _DEFAULT_TIMEOUT
+        self.write_timeout: int = MLFLOW_ARTIFACT_UPLOAD_DOWNLOAD_TIMEOUT.get() or _DEFAULT_TIMEOUT
 
         # Allow override for testing
         if client:
-            self.client = client
+            self.client: Any = client
             return
 
         from azure.storage.blob import BlobServiceClient
@@ -70,7 +72,8 @@ class AzureBlobArtifactRepository(ArtifactRepository, MultipartUploadMixin):
         (_, account, _, api_uri_suffix) = AzureBlobArtifactRepository.parse_wasbs_uri(artifact_uri)
         if "AZURE_STORAGE_CONNECTION_STRING" in os.environ:
             self.client = BlobServiceClient.from_connection_string(
-                conn_str=os.environ.get("AZURE_STORAGE_CONNECTION_STRING"),
+                # The membership check above guarantees the env var is set.
+                conn_str=cast(str, os.environ.get("AZURE_STORAGE_CONNECTION_STRING")),
                 connection_verify=get_default_host_creds(artifact_uri).verify,
             )
         elif "AZURE_STORAGE_ACCESS_KEY" in os.environ:
@@ -97,7 +100,7 @@ class AzureBlobArtifactRepository(ArtifactRepository, MultipartUploadMixin):
             )
 
     @staticmethod
-    def parse_wasbs_uri(uri):
+    def parse_wasbs_uri(uri: str) -> tuple[str, str, str, str]:
         """Parse a wasbs:// URI, returning (container, storage_account, path, api_uri_suffix)."""
         parsed = urllib.parse.urlparse(uri)
         if parsed.scheme != "wasbs":
@@ -122,7 +125,7 @@ class AzureBlobArtifactRepository(ArtifactRepository, MultipartUploadMixin):
         path = path.removeprefix("/")
         return container, storage_account, path, api_uri_suffix
 
-    def log_artifact(self, local_file, artifact_path=None):
+    def log_artifact(self, local_file: str, artifact_path: str | None = None) -> None:
         (container, _, dest_path, _) = self.parse_wasbs_uri(self.artifact_uri)
         container_client = self.client.get_container_client(container)
         if artifact_path:
@@ -133,7 +136,7 @@ class AzureBlobArtifactRepository(ArtifactRepository, MultipartUploadMixin):
                 dest_path, file, overwrite=True, timeout=self.write_timeout
             )
 
-    def log_artifacts(self, local_dir, artifact_path=None):
+    def log_artifacts(self, local_dir: str, artifact_path: str | None = None) -> None:
         (container, _, dest_path, _) = self.parse_wasbs_uri(self.artifact_uri)
         container_client = self.client.get_container_client(container)
         if artifact_path:
@@ -152,7 +155,7 @@ class AzureBlobArtifactRepository(ArtifactRepository, MultipartUploadMixin):
                         remote_file_path, file, overwrite=True, timeout=self.write_timeout
                     )
 
-    def list_artifacts(self, path=None):
+    def list_artifacts(self, path: str | None = None) -> list[FileInfo]:
         # Newer versions of `azure-storage-blob` (>= 12.4.0) provide a public
         # `azure.storage.blob.BlobPrefix` object to signify that a blob is a directory,
         # while older versions only expose this API internally as
@@ -160,7 +163,11 @@ class AzureBlobArtifactRepository(ArtifactRepository, MultipartUploadMixin):
         try:
             from azure.storage.blob import BlobPrefix
         except ImportError:
-            from azure.storage.blob._models import BlobPrefix
+            # Older azure-storage-blob versions only expose BlobPrefix privately; the stubs
+            # for the installed version do not declare it, hence the ignores.
+            from azure.storage.blob._models import (  # type: ignore[attr-defined,no-redef]
+                BlobPrefix,
+            )
 
         def is_dir(result):
             return isinstance(result, BlobPrefix)
@@ -217,7 +224,7 @@ class AzureBlobArtifactRepository(ArtifactRepository, MultipartUploadMixin):
                 error_code=RESOURCE_DOES_NOT_EXIST,
             ) from e
 
-    def delete_artifacts(self, artifact_path=None):
+    def delete_artifacts(self, artifact_path: str | None = None) -> None:
         from azure.core.exceptions import ResourceNotFoundError
 
         (container, _, dest_path, _) = self.parse_wasbs_uri(self.artifact_uri)
@@ -236,7 +243,9 @@ class AzureBlobArtifactRepository(ArtifactRepository, MultipartUploadMixin):
         except ResourceNotFoundError:
             raise MlflowException(f"No such file or directory: '{dest_path}'")
 
-    def create_multipart_upload(self, local_file, num_parts=1, artifact_path=None):
+    def create_multipart_upload(
+        self, local_file: str, num_parts: int = 1, artifact_path: str | None = None
+    ) -> CreateMultipartUploadResponse:
         from azure.storage.blob import BlobSasPermissions, generate_blob_sas
 
         (container, _, dest_path, _) = self.parse_wasbs_uri(self.artifact_uri)
@@ -273,14 +282,22 @@ class AzureBlobArtifactRepository(ArtifactRepository, MultipartUploadMixin):
             upload_id=None,
         )
 
-    def complete_multipart_upload(self, local_file, upload_id, parts=None, artifact_path=None):
+    def complete_multipart_upload(
+        self,
+        local_file: str,
+        upload_id: str,
+        parts: list[MultipartUploadPart] | None = None,
+        artifact_path: str | None = None,
+    ) -> None:
         (container, _, dest_path, _) = self.parse_wasbs_uri(self.artifact_uri)
         if artifact_path:
             dest_path = posixpath.join(dest_path, artifact_path)
         dest_path = posixpath.join(dest_path, os.path.basename(local_file))
 
         block_ids = []
-        for part in parts:
+        # parts defaults to None here; iterating it unguarded raises TypeError at runtime,
+        # so callers must always pass the parts collected from create_multipart_upload.
+        for part in parts:  # type: ignore[union-attr]
             qs = urllib.parse.urlparse(part.url).query
             block_id = urllib.parse.parse_qs(qs)["blockid"][0]
             block_id = decode_base64(urllib.parse.unquote(block_id))
@@ -288,7 +305,9 @@ class AzureBlobArtifactRepository(ArtifactRepository, MultipartUploadMixin):
         blob_client = self.client.get_blob_client(container, dest_path)
         blob_client.commit_block_list(block_ids)
 
-    def abort_multipart_upload(self, local_file, upload_id, artifact_path=None):
+    def abort_multipart_upload(
+        self, local_file: str, upload_id: str, artifact_path: str | None = None
+    ) -> None:
         # There is no way to delete uncommitted blocks in Azure Blob Storage.
         # Instead, they are garbage collected within 7 days.
         # See https://docs.microsoft.com/en-us/rest/api/storageservices/put-block-list#remarks

@@ -4,12 +4,17 @@ import re
 import threading
 from abc import ABCMeta, abstractmethod
 from time import sleep, time
-from typing import Any
+from typing import Any, cast
 
 from pydantic import BaseModel
 
 from mlflow.entities.logged_model_tag import LoggedModelTag
-from mlflow.entities.model_registry import ModelVersionTag, RegisteredModelTag
+from mlflow.entities.model_registry import (
+    ModelVersion,
+    ModelVersionTag,
+    RegisteredModel,
+    RegisteredModelTag,
+)
 from mlflow.entities.model_registry.model_version_status import ModelVersionStatus
 from mlflow.entities.model_registry.model_version_tag import ModelVersionTag
 from mlflow.entities.model_registry.prompt import Prompt
@@ -55,7 +60,7 @@ class AbstractStore:
 
     __metaclass__ = ABCMeta
 
-    def __init__(self, store_uri=None, tracking_uri=None):
+    def __init__(self, store_uri: str | None = None, tracking_uri: str | None = None) -> None:
         """
         Empty constructor. This is deliberately not marked as abstract, else every derived class
         would be forced to create one.
@@ -74,7 +79,7 @@ class AbstractStore:
         self._link_to_model_lock = threading.RLock()
         self._link_to_run_lock = threading.RLock()
 
-    def __getstate__(self):
+    def __getstate__(self) -> dict[str, Any]:
         """Support for pickle serialization by excluding the non-picklable RLocks."""
         state = self.__dict__.copy()
         # Remove the RLocks as they cannot be pickled
@@ -83,7 +88,7 @@ class AbstractStore:
         del state["_link_to_run_lock"]
         return state
 
-    def __setstate__(self, state):
+    def __setstate__(self, state: dict[str, Any]) -> None:
         """Support for pickle deserialization by recreating the RLocks."""
         self.__dict__.update(state)
         # Recreate the RLocks
@@ -94,7 +99,13 @@ class AbstractStore:
     # CRUD API for RegisteredModel objects
 
     @abstractmethod
-    def create_registered_model(self, name, tags=None, description=None, deployment_job_id=None):
+    def create_registered_model(
+        self,
+        name: str,
+        tags: list[RegisteredModelTag] | None = None,
+        description: str | None = None,
+        deployment_job_id: str | None = None,
+    ) -> RegisteredModel:
         """
         Create a new registered model in backend store.
 
@@ -112,7 +123,9 @@ class AbstractStore:
         """
 
     @abstractmethod
-    def update_registered_model(self, name, description, deployment_job_id=None):
+    def update_registered_model(
+        self, name: str, description: str, deployment_job_id: str | None = None
+    ) -> RegisteredModel:
         """
         Update description of the registered model.
 
@@ -126,7 +139,7 @@ class AbstractStore:
         """
 
     @abstractmethod
-    def rename_registered_model(self, name, new_name):
+    def rename_registered_model(self, name: str, new_name: str) -> RegisteredModel:
         """
         Rename the registered model.
 
@@ -139,7 +152,7 @@ class AbstractStore:
         """
 
     @abstractmethod
-    def delete_registered_model(self, name):
+    def delete_registered_model(self, name: str) -> None:
         """
         Delete the registered model.
         Backend raises exception if a registered model with given name does not exist.
@@ -153,8 +166,12 @@ class AbstractStore:
 
     @abstractmethod
     def search_registered_models(
-        self, filter_string=None, max_results=None, order_by=None, page_token=None
-    ):
+        self,
+        filter_string: str | None = None,
+        max_results: int | None = None,
+        order_by: list[str] | None = None,
+        page_token: str | None = None,
+    ) -> PagedList[RegisteredModel]:
         """
         Search for registered models in backend that satisfy the filter criteria.
 
@@ -173,7 +190,7 @@ class AbstractStore:
         """
 
     @abstractmethod
-    def get_registered_model(self, name):
+    def get_registered_model(self, name: str) -> RegisteredModel:
         """
         Get registered model instance by name.
 
@@ -185,7 +202,7 @@ class AbstractStore:
         """
 
     @abstractmethod
-    def get_latest_versions(self, name, stages=None):
+    def get_latest_versions(self, name: str, stages: list[str] | None = None) -> list[ModelVersion]:
         """
         Latest version models for each requested stage. If no ``stages`` argument is provided,
         returns the latest version for each stage.
@@ -200,7 +217,7 @@ class AbstractStore:
         """
 
     @abstractmethod
-    def set_registered_model_tag(self, name, tag):
+    def set_registered_model_tag(self, name: str, tag: RegisteredModelTag) -> None:
         """
         Set a tag for the registered model.
 
@@ -213,7 +230,7 @@ class AbstractStore:
         """
 
     @abstractmethod
-    def delete_registered_model_tag(self, name, key):
+    def delete_registered_model_tag(self, name: str, key: str) -> None:
         """
         Delete a tag associated with the registered model.
 
@@ -230,15 +247,15 @@ class AbstractStore:
     @abstractmethod
     def create_model_version(
         self,
-        name,
-        source,
-        run_id=None,
-        tags=None,
-        run_link=None,
-        description=None,
-        local_model_path=None,
+        name: str,
+        source: str,
+        run_id: str | None = None,
+        tags: list[ModelVersionTag] | None = None,
+        run_link: str | None = None,
+        description: str | None = None,
+        local_model_path: str | None = None,
         model_id: str | None = None,
-    ):
+    ) -> ModelVersion:
         """
         Create a new model version from given source and run ID.
 
@@ -266,7 +283,7 @@ class AbstractStore:
         """
 
     @abstractmethod
-    def update_model_version(self, name, version, description):
+    def update_model_version(self, name: str, version: str | int, description: str) -> ModelVersion:
         """
         Update metadata associated with a model version in backend.
 
@@ -280,7 +297,13 @@ class AbstractStore:
         """
 
     @abstractmethod
-    def transition_model_version_stage(self, name, version, stage, archive_existing_versions):
+    def transition_model_version_stage(
+        self,
+        name: str,
+        version: str | int,
+        stage: str,
+        archive_existing_versions: bool,
+    ) -> ModelVersion:
         """
         Update model version stage.
 
@@ -299,7 +322,7 @@ class AbstractStore:
         """
 
     @abstractmethod
-    def delete_model_version(self, name, version):
+    def delete_model_version(self, name: str, version: str | int) -> None:
         """
         Delete model model version in backend.
 
@@ -312,7 +335,7 @@ class AbstractStore:
         """
 
     @abstractmethod
-    def get_model_version(self, name, version):
+    def get_model_version(self, name: str, version: str | int) -> ModelVersion:
         """
         Get the model version instance by name and version.
 
@@ -325,7 +348,7 @@ class AbstractStore:
         """
 
     @abstractmethod
-    def get_model_version_download_uri(self, name, version):
+    def get_model_version_download_uri(self, name: str, version: str | int) -> str:
         """
         Get the download location in Model Registry for this model version.
         NOTE: For first version of Model Registry, since the models are not copied over to another
@@ -341,8 +364,12 @@ class AbstractStore:
 
     @abstractmethod
     def search_model_versions(
-        self, filter_string=None, max_results=None, order_by=None, page_token=None
-    ):
+        self,
+        filter_string: str | None = None,
+        max_results: int | None = None,
+        order_by: list[str] | None = None,
+        page_token: str | None = None,
+    ) -> PagedList[ModelVersion]:
         """
         Search for model versions in backend that satisfy the filter criteria.
 
@@ -364,7 +391,7 @@ class AbstractStore:
         """
 
     @abstractmethod
-    def set_model_version_tag(self, name, version, tag):
+    def set_model_version_tag(self, name: str, version: str | int, tag: ModelVersionTag) -> None:
         """
         Set a tag for the model version.
 
@@ -378,7 +405,7 @@ class AbstractStore:
         """
 
     @abstractmethod
-    def delete_model_version_tag(self, name, version, key):
+    def delete_model_version_tag(self, name: str, version: str | int, key: str) -> None:
         """
         Delete a tag associated with the model version.
 
@@ -392,7 +419,7 @@ class AbstractStore:
         """
 
     @abstractmethod
-    def set_registered_model_alias(self, name, alias, version):
+    def set_registered_model_alias(self, name: str, alias: str, version: str | int) -> None:
         """
         Set a registered model alias pointing to a model version.
 
@@ -406,7 +433,7 @@ class AbstractStore:
         """
 
     @abstractmethod
-    def delete_registered_model_alias(self, name, alias):
+    def delete_registered_model_alias(self, name: str, alias: str) -> None:
         """
         Delete an alias associated with a registered model.
 
@@ -419,7 +446,7 @@ class AbstractStore:
         """
 
     @abstractmethod
-    def get_model_version_by_alias(self, name, alias):
+    def get_model_version_by_alias(self, name: str, alias: str) -> ModelVersion:
         """
         Get the model version instance by name and alias.
 
@@ -431,7 +458,7 @@ class AbstractStore:
             A single :py:class:`mlflow.entities.model_registry.ModelVersion` object.
         """
 
-    def copy_model_version(self, src_mv, dst_name):
+    def copy_model_version(self, src_mv: ModelVersion, dst_name: str) -> ModelVersion:
         """
         Copy a model version from one registered model to another as a new model version.
 
@@ -478,7 +505,7 @@ class AbstractStore:
 
         return mv_copy
 
-    def _await_model_version_creation(self, mv, await_creation_for):
+    def _await_model_version_creation(self, mv: ModelVersion, await_creation_for: int) -> None:
         """
         Await for model version to become ready after creation.
 
@@ -489,7 +516,9 @@ class AbstractStore:
         """
         self._await_model_version_creation_impl(mv, await_creation_for)
 
-    def _await_model_version_creation_impl(self, mv, await_creation_for, hint=""):
+    def _await_model_version_creation_impl(
+        self, mv: ModelVersion, await_creation_for: int, hint: str = ""
+    ) -> None:
         entity_type = "Prompt" if has_prompt_tag(mv.tags) else "Model"
         _logger.info(
             f"Waiting up to {await_creation_for} seconds for {entity_type.lower()} version to "
@@ -854,10 +883,12 @@ class AbstractStore:
             rm = self.get_registered_model(name)
 
             # Check if this is actually a prompt using _tags (internal tags)
+            # Store overrides may expose `_tags` as a legacy list of tag objects rather than
+            # the dict the entity declares; keep both shapes working.
             if hasattr(rm, "_tags") and isinstance(rm._tags, dict):
                 internal_tags = rm._tags.copy()
             elif hasattr(rm, "_tags") and rm._tags:
-                internal_tags = {tag.key: tag.value for tag in rm._tags}
+                internal_tags = {tag.key: tag.value for tag in rm._tags}  # type: ignore[attr-defined]
             else:
                 internal_tags = {}
 
@@ -969,10 +1000,12 @@ class AbstractStore:
         """
         # Verify the registered model exists and is a prompt
         rm = self.get_registered_model(name)
+        # Store overrides may expose `_tags` as a legacy list of tag objects rather than
+        # the dict the entity declares; keep both shapes working.
         if hasattr(rm, "_tags") and isinstance(rm._tags, dict):
             internal_tags = rm._tags
         elif hasattr(rm, "_tags") and rm._tags:
-            internal_tags = {tag.key: tag.value for tag in rm._tags}
+            internal_tags = {tag.key: tag.value for tag in rm._tags}  # type: ignore[attr-defined]
         else:
             internal_tags = {}
 
@@ -1121,7 +1154,11 @@ class AbstractStore:
                 )
 
             current_tag_value = logged_model.tags.get(TraceTagKey.LINKED_PROMPTS)
-            updated_tag_value = update_linked_prompts_tag(current_tag_value, [prompt_version])
+            # Stores raise when a prompt version cannot be resolved, so treat the lookup
+            # result as non-None here.
+            updated_tag_value = update_linked_prompts_tag(
+                current_tag_value, [cast(PromptVersion, prompt_version)]
+            )
 
             if current_tag_value != updated_tag_value:
                 tracking_store.set_logged_model_tags(
@@ -1167,7 +1204,9 @@ class AbstractStore:
                         current_tag_value = tag.value
                         break
 
-            updated_tag_value = update_linked_prompts_tag(current_tag_value, [prompt_version])
+            updated_tag_value = update_linked_prompts_tag(
+                current_tag_value, [cast(PromptVersion, prompt_version)]
+            )
 
             if current_tag_value != updated_tag_value:
                 from mlflow.entities import RunTag

@@ -6,7 +6,7 @@ import posixpath
 import tempfile
 import uuid
 from pathlib import Path
-from typing import Any
+from typing import Any, cast
 
 import requests
 
@@ -71,7 +71,10 @@ from mlflow.utils.file_utils import (
 )
 from mlflow.utils.proto_json_utils import message_to_json
 from mlflow.utils.request_utils import cloud_storage_http_request
-from mlflow.utils.rest_utils import (
+
+# augmented_raise_for_status is defined in mlflow.utils.rest_utils but is not re-exported
+# there under mypy's no-implicit-reexport setting.
+from mlflow.utils.rest_utils import (  # type: ignore[attr-defined]
     _REST_API_PATH_PREFIX,
     augmented_raise_for_status,
     call_endpoint,
@@ -133,11 +136,11 @@ class DatabricksArtifactRepository(CloudArtifactRepository):
             registry_uri,
         )
 
-        self.databricks_profile_uri = (
+        self.databricks_profile_uri: str = (
             get_databricks_profile_uri_from_artifact_uri(artifact_uri)
             or mlflow.tracking.get_tracking_uri()
         )
-        self.resource = self._extract_resource(self.artifact_uri)
+        self.resource: _Resource = self._extract_resource(self.artifact_uri)
 
     def _extract_resource(self, artifact_uri) -> _Resource:
         """
@@ -151,7 +154,7 @@ class DatabricksArtifactRepository(CloudArtifactRepository):
             A `_Resource` object representing the MLflow resource associated with the specified
             artifact URI.
         """
-        artifact_path = extract_and_normalize_path(artifact_uri)
+        artifact_path: str = extract_and_normalize_path(artifact_uri)
         parts = artifact_path.split("/")
 
         if parts[3] == "logged_models":
@@ -171,7 +174,7 @@ class DatabricksArtifactRepository(CloudArtifactRepository):
         """
         Extracts the run ID from the run artifact URI.
         """
-        artifact_path = extract_and_normalize_path(artifact_uri)
+        artifact_path: str = extract_and_normalize_path(artifact_uri)
         parts = artifact_path.split("/")
         if len(parts) < 4:
             return None
@@ -301,7 +304,9 @@ class DatabricksArtifactRepository(CloudArtifactRepository):
             partial_path.unlink(missing_ok=True)
             raise
 
-    def _download_trace_file_to_path(
+    # The retry loop below always exits via a return or by re-raising on the final attempt;
+    # mypy cannot prove the fall-through is unreachable.
+    def _download_trace_file_to_path(  # type: ignore[return]
         self, signed_uri: str, dst_path: Path, headers: dict[str, str]
     ) -> Path:
         try:
@@ -332,7 +337,9 @@ class DatabricksArtifactRepository(CloudArtifactRepository):
         try:
             return self._download_trace_file_to_path(signed_uri, dst_path, headers)
         except requests.HTTPError as e:
-            if e.response.status_code == 404:
+            # HTTPError raised by raise_for_status always carries the offending response.
+            response = cast(requests.Response, e.response)
+            if response.status_code == 404:
                 raise MlflowTraceDataNotFound(request_id=self.resource.id) from e
             raise
 
@@ -341,7 +348,8 @@ class DatabricksArtifactRepository(CloudArtifactRepository):
             dst = Path(temp_dir, "traces.json")
             self.download_trace_data_to_file(dst)
             try:
-                return json.loads(dst.read_text(encoding="utf-8"))
+                trace_data: dict[str, Any] = json.loads(dst.read_text(encoding="utf-8"))
+                return trace_data
             except json.JSONDecodeError as e:
                 raise MlflowTraceDataCorrupted(request_id=self.resource.id) from e
 
@@ -410,7 +418,9 @@ class DatabricksArtifactRepository(CloudArtifactRepository):
         try:
             return self._download_trace_file_to_path(cred.signed_uri, dst_path, headers)
         except requests.HTTPError as e:
-            if e.response.status_code == 404:
+            # HTTPError raised by raise_for_status always carries the offending response.
+            response = cast(requests.Response, e.response)
+            if response.status_code == 404:
                 raise MlflowException(
                     f"Attachment '{path}' not found.",
                     error_code=RESOURCE_DOES_NOT_EXIST,
@@ -515,7 +525,9 @@ class DatabricksArtifactRepository(CloudArtifactRepository):
         try:
             put_block(credentials.signed_uri, block_id, chunk, headers=headers)
         except requests.HTTPError as e:
-            if e.response.status_code in [401, 403]:
+            # HTTPError raised by raise_for_status always carries the offending response.
+            response = cast(requests.Response, e.response)
+            if response.status_code in [401, 403]:
                 _logger.info(
                     "Failed to authorize request, possibly due to credential expiration."
                     " Refreshing credentials and trying again..."
@@ -591,7 +603,9 @@ class DatabricksArtifactRepository(CloudArtifactRepository):
             try:
                 put_block_list(credentials.signed_uri, uploading_block_list, headers=headers)
             except requests.HTTPError as e:
-                if e.response.status_code in [401, 403]:
+                # HTTPError raised by raise_for_status always carries the offending response.
+                response = cast(requests.Response, e.response)
+                if response.status_code in [401, 403]:
                     _logger.info(
                         "Failed to authorize request, possibly due to credential expiration."
                         " Refreshing credentials and trying again..."
@@ -603,7 +617,7 @@ class DatabricksArtifactRepository(CloudArtifactRepository):
                 else:
                     raise e
         except Exception as err:
-            raise MlflowException(err)
+            raise MlflowException(str(err))
 
     def _retryable_adls_function(self, func, artifact_file_path, get_credentials, **kwargs):
         """
@@ -619,7 +633,9 @@ class DatabricksArtifactRepository(CloudArtifactRepository):
         try:
             func(**kwargs)
         except requests.HTTPError as e:
-            if e.response.status_code in [403]:
+            # HTTPError raised by raise_for_status always carries the offending response.
+            response = cast(requests.Response, e.response)
+            if response.status_code in [403]:
                 _logger.info(
                     "Failed to authorize ADLS operation, possibly due "
                     "to credential expiration. Refreshing credentials and trying again..."
@@ -708,7 +724,7 @@ class DatabricksArtifactRepository(CloudArtifactRepository):
                     headers=headers,
                 )
         except Exception as err:
-            raise MlflowException(err)
+            raise MlflowException(str(err))
 
     def _signed_url_upload_file(self, credentials, local_file):
         try:
@@ -727,7 +743,7 @@ class DatabricksArtifactRepository(CloudArtifactRepository):
                     ) as response:
                         augmented_raise_for_status(response)
         except Exception as err:
-            raise MlflowException(err)
+            raise MlflowException(str(err))
 
     def _upload_to_cloud(self, cloud_credential_info, src_file_path, artifact_file_path):
         """
@@ -801,7 +817,7 @@ class DatabricksArtifactRepository(CloudArtifactRepository):
                 self._extract_headers_from_credentials(cloud_credential_info.headers),
             )
         except Exception as err:
-            raise MlflowException(err)
+            raise MlflowException(str(err))
 
     def _create_multipart_upload(self, run_id, path, num_parts):
         return self._call_endpoint(
@@ -837,7 +853,9 @@ class DatabricksArtifactRepository(CloudArtifactRepository):
         try:
             return self._upload_part(cred_info, data)
         except requests.HTTPError as e:
-            if e.response.status_code not in (401, 403):
+            # HTTPError raised by raise_for_status always carries the offending response.
+            response = cast(requests.Response, e.response)
+            if response.status_code not in (401, 403):
                 raise e
             _logger.info(
                 "Failed to authorize request, possibly due to credential expiration."
@@ -920,7 +938,7 @@ class DatabricksArtifactRepository(CloudArtifactRepository):
             self._abort_multipart_upload(create_mpu_resp.abort_credential_info)
             raise e
 
-    def log_artifact(self, local_file, artifact_path=None):
+    def log_artifact(self, local_file: str, artifact_path: str | None = None) -> None:
         src_file_name = os.path.basename(local_file)
         artifact_file_path = posixpath.join(artifact_path or "", src_file_name)
         write_credential_info = self._get_write_credential_infos([artifact_file_path])[0]
@@ -933,5 +951,5 @@ class DatabricksArtifactRepository(CloudArtifactRepository):
     def list_artifacts(self, path: str | None = None) -> list[FileInfo]:
         return self.resource.list_artifacts(path)
 
-    def delete_artifacts(self, artifact_path=None):
+    def delete_artifacts(self, artifact_path: str | None = None) -> None:
         raise MlflowException("Not implemented yet")

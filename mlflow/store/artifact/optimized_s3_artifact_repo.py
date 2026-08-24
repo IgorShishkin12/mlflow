@@ -3,7 +3,9 @@ import logging
 import os
 import posixpath
 import urllib.parse
+from collections.abc import Callable
 from mimetypes import guess_type
+from typing import Any
 
 from mlflow.entities import FileInfo
 from mlflow.environment_variables import (
@@ -24,8 +26,10 @@ from mlflow.store.artifact.cloud_artifact_repo import (
 )
 from mlflow.store.artifact.s3_artifact_repo import _get_s3_client
 from mlflow.utils.file_utils import read_chunk
-from mlflow.utils.request_utils import cloud_storage_http_request
-from mlflow.utils.rest_utils import augmented_raise_for_status
+
+# ``augmented_raise_for_status`` is defined in request_utils (rest_utils merely re-imports it),
+# so import it from its defining module.
+from mlflow.utils.request_utils import augmented_raise_for_status, cloud_storage_http_request
 
 _logger = logging.getLogger(__name__)
 _BUCKET_REGION = "BucketRegion"
@@ -47,17 +51,17 @@ class OptimizedS3ArtifactRepository(CloudArtifactRepository):
 
     def __init__(
         self,
-        artifact_uri,
-        access_key_id=None,
-        secret_access_key=None,
-        session_token=None,
-        credential_refresh_def=None,
-        addressing_style=None,
-        s3_endpoint_url=None,
-        s3_upload_extra_args=None,
-        tracking_uri=None,
+        artifact_uri: str,
+        access_key_id: str | None = None,
+        secret_access_key: str | None = None,
+        session_token: str | None = None,
+        credential_refresh_def: Callable[[], dict[str, Any]] | None = None,
+        addressing_style: str | None = None,
+        s3_endpoint_url: str | None = None,
+        s3_upload_extra_args: dict[str, Any] | None = None,
+        tracking_uri: str | None = None,
         registry_uri: str | None = None,
-    ):
+    ) -> None:
         super().__init__(artifact_uri, tracking_uri=tracking_uri, registry_uri=registry_uri)
         self._access_key_id = access_key_id
         self._secret_access_key = secret_access_key
@@ -149,7 +153,7 @@ class OptimizedS3ArtifactRepository(CloudArtifactRepository):
             s3_endpoint_url=self._s3_endpoint_url,
         )
 
-    def parse_s3_compliant_uri(self, uri):
+    def parse_s3_compliant_uri(self, uri: str) -> tuple[str, str]:
         """Parse an S3 URI, returning (bucket, path)"""
         parsed = urllib.parse.urlparse(uri)
         if parsed.scheme != "s3":
@@ -159,9 +163,10 @@ class OptimizedS3ArtifactRepository(CloudArtifactRepository):
         return parsed.netloc, path
 
     @staticmethod
-    def get_s3_file_upload_extra_args():
+    def get_s3_file_upload_extra_args() -> dict[str, Any] | None:
         if s3_file_upload_extra_args := MLFLOW_S3_UPLOAD_EXTRA_ARGS.get():
-            return json.loads(s3_file_upload_extra_args)
+            extra_args: dict[str, Any] | None = json.loads(s3_file_upload_extra_args)
+            return extra_args
         else:
             return None
 
@@ -187,7 +192,7 @@ class OptimizedS3ArtifactRepository(CloudArtifactRepository):
             orig_creds=s3_client,
         )
 
-    def log_artifact(self, local_file, artifact_path=None):
+    def log_artifact(self, local_file: str, artifact_path: str | None = None) -> None:
         artifact_file_path = os.path.basename(local_file)
         if artifact_path:
             artifact_file_path = posixpath.join(artifact_path, artifact_file_path)
@@ -298,7 +303,7 @@ class OptimizedS3ArtifactRepository(CloudArtifactRepository):
             )
             raise e
 
-    def list_artifacts(self, path=None):
+    def list_artifacts(self, path: str | None = None) -> list[FileInfo]:
         artifact_path = self.bucket_path
         dest_path = self.bucket_path
         if path:
@@ -378,7 +383,7 @@ class OptimizedS3ArtifactRepository(CloudArtifactRepository):
             orig_creds=s3_client,
         )
 
-    def delete_artifacts(self, artifact_path=None):
+    def delete_artifacts(self, artifact_path: str | None = None) -> None:
         dest_path = self.bucket_path
         if artifact_path:
             dest_path = posixpath.join(dest_path, artifact_path)

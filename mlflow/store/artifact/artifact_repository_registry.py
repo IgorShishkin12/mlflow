@@ -1,4 +1,6 @@
 import warnings
+from collections.abc import Callable
+from typing import Any
 
 from mlflow.exceptions import MlflowException
 from mlflow.store.artifact.artifact_repo import ArtifactRepository
@@ -22,6 +24,10 @@ from mlflow.utils.plugins import get_entry_points
 from mlflow.utils.uri import get_uri_scheme, is_uc_volumes_uri
 from mlflow.utils.workspace_context import get_request_workspace
 
+# Registered values are either ArtifactRepository subclasses or factory functions; both are
+# invoked uniformly as `repository(artifact_uri, tracking_uri=..., registry_uri=...)`.
+_ArtifactRepositoryFactory = Callable[..., ArtifactRepository]
+
 
 class ArtifactRepositoryRegistry:
     """Scheme-based registry for artifact repository implementations
@@ -36,14 +42,14 @@ class ArtifactRepositoryRegistry:
     which will be called with same arguments passed to the `get_artifact_repository` method.
     """
 
-    def __init__(self):
-        self._registry = {}
+    def __init__(self) -> None:
+        self._registry: dict[str, _ArtifactRepositoryFactory] = {}
 
-    def register(self, scheme, repository):
+    def register(self, scheme: str, repository: _ArtifactRepositoryFactory) -> None:
         """Register artifact repositories provided by other packages"""
         self._registry[scheme] = repository
 
-    def register_entrypoints(self):
+    def register_entrypoints(self) -> None:
         # Register artifact repositories provided by other packages
         for entrypoint in get_entry_points("mlflow.artifact_repository"):
             try:
@@ -82,7 +88,9 @@ class ArtifactRepositoryRegistry:
                 f"Could not find a registered artifact repository for: {artifact_uri}. "
                 f"Currently registered schemes are: {list(self._registry.keys())}"
             )
-        repository_instance = repository(
+        # Some registered repositories expose a workspace-aware variant; the duck-typed lookup
+        # is kept as Any because `for_workspace` is not part of the ArtifactRepository contract.
+        repository_instance: Any = repository(
             artifact_uri, tracking_uri=tracking_uri, registry_uri=registry_uri
         )
 
@@ -90,9 +98,12 @@ class ArtifactRepositoryRegistry:
         if workspace_name and hasattr(repository_instance, "for_workspace"):
             repository_instance = repository_instance.for_workspace(workspace_name)
 
-        return repository_instance
+        # The duck-typed `for_workspace` lookup above forces repository_instance to Any;
+        # bind it to the declared contract before returning.
+        resolved_repository: ArtifactRepository = repository_instance
+        return resolved_repository
 
-    def get_registered_artifact_repositories(self):
+    def get_registered_artifact_repositories(self) -> dict[str, _ArtifactRepositoryFactory]:
         """
         Get all registered artifact repositories.
 
@@ -160,7 +171,7 @@ def get_artifact_repository(
     )
 
 
-def get_registered_artifact_repositories() -> dict[str, ArtifactRepository]:
+def get_registered_artifact_repositories() -> dict[str, _ArtifactRepositoryFactory]:
     """
     Get all registered artifact repositories.
 

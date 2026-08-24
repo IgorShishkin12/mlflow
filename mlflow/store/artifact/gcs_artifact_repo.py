@@ -2,6 +2,7 @@ import datetime
 import os
 import posixpath
 import urllib.parse
+from collections.abc import Callable
 from typing import Any, NamedTuple
 
 from packaging.version import Version
@@ -10,6 +11,7 @@ from mlflow.entities import FileInfo
 from mlflow.entities.multipart_upload import (
     CreateMultipartUploadResponse,
     MultipartUploadCredential,
+    MultipartUploadPart,
 )
 from mlflow.environment_variables import (
     MLFLOW_ARTIFACT_UPLOAD_DOWNLOAD_TIMEOUT,
@@ -64,7 +66,7 @@ class GCSArtifactRepository(ArtifactRepository, MultipartUploadMixin):
             MLFLOW_ARTIFACT_UPLOAD_DOWNLOAD_TIMEOUT.get() or _DEFAULT_TIMEOUT
         )
         # Method to use for refresh
-        self.credential_refresh_def = credential_refresh_def
+        self.credential_refresh_def: Callable[[], dict[str, Any]] | None = credential_refresh_def
         # If the user-supplied timeout environment variable value is -1,
         # use `None` for `self._GCS_DEFAULT_TIMEOUT`
         # to use indefinite timeout
@@ -72,7 +74,7 @@ class GCSArtifactRepository(ArtifactRepository, MultipartUploadMixin):
             None if self._GCS_DEFAULT_TIMEOUT == -1 else self._GCS_DEFAULT_TIMEOUT
         )
         if client is not None:
-            self.client = client
+            self.client: Any = client
         else:
             try:
                 self.client = gcs_storage.Client()
@@ -80,7 +82,7 @@ class GCSArtifactRepository(ArtifactRepository, MultipartUploadMixin):
                 self.client = gcs_storage.Client.create_anonymous_client()
 
     @staticmethod
-    def parse_gcs_uri(uri):
+    def parse_gcs_uri(uri: str) -> tuple[str, str]:
         """Parse an GCS URI, returning (bucket, path)"""
         parsed = urllib.parse.urlparse(uri)
         if parsed.scheme != "gs":
@@ -104,7 +106,7 @@ class GCSArtifactRepository(ArtifactRepository, MultipartUploadMixin):
         self.client = Client(project="mlflow", credentials=credentials)
         return self._get_bucket(bucket)
 
-    def log_artifact(self, local_file, artifact_path=None):
+    def log_artifact(self, local_file: str, artifact_path: str | None = None) -> None:
         (bucket, dest_path) = self.parse_gcs_uri(self.artifact_uri)
         if artifact_path:
             dest_path = posixpath.join(dest_path, artifact_path)
@@ -114,7 +116,7 @@ class GCSArtifactRepository(ArtifactRepository, MultipartUploadMixin):
         blob = gcs_bucket.blob(dest_path, chunk_size=self._GCS_UPLOAD_CHUNK_SIZE)
         blob.upload_from_filename(local_file, timeout=self._GCS_DEFAULT_TIMEOUT)
 
-    def log_artifacts(self, local_dir, artifact_path=None):
+    def log_artifacts(self, local_dir: str, artifact_path: str | None = None) -> None:
         (bucket, dest_path) = self.parse_gcs_uri(self.artifact_uri)
         if artifact_path:
             dest_path = posixpath.join(dest_path, artifact_path)
@@ -144,7 +146,7 @@ class GCSArtifactRepository(ArtifactRepository, MultipartUploadMixin):
                     try_func=try_func, creds_func=self._refresh_credentials, orig_creds=gcs_bucket
                 )
 
-    def list_artifacts(self, path=None):
+    def list_artifacts(self, path: str | None = None) -> list[FileInfo]:
         (bucket, artifact_path) = self.parse_gcs_uri(self.artifact_uri)
         dest_path = artifact_path
         if path:
@@ -232,7 +234,9 @@ class GCSArtifactRepository(ArtifactRepository, MultipartUploadMixin):
             transport=transport, url=url, headers=headers, content_type=content_type
         )
 
-    def create_multipart_upload(self, local_file, num_parts=1, artifact_path=None):
+    def create_multipart_upload(
+        self, local_file: str, num_parts: int = 1, artifact_path: str | None = None
+    ) -> CreateMultipartUploadResponse:
         self._validate_support_mpu()
         from google.resumable_media.requests import XMLMPUContainer
 
@@ -271,7 +275,13 @@ class GCSArtifactRepository(ArtifactRepository, MultipartUploadMixin):
             upload_id=upload_id,
         )
 
-    def complete_multipart_upload(self, local_file, upload_id, parts=None, artifact_path=None):
+    def complete_multipart_upload(
+        self,
+        local_file: str,
+        upload_id: str,
+        parts: list[MultipartUploadPart] | None = None,
+        artifact_path: str | None = None,
+    ) -> None:
         self._validate_support_mpu()
         from google.resumable_media.requests import XMLMPUContainer
 
@@ -285,12 +295,16 @@ class GCSArtifactRepository(ArtifactRepository, MultipartUploadMixin):
         args = self._gcs_mpu_arguments(local_file, blob)
         container = XMLMPUContainer(args.url, local_file, headers=args.headers)
         container._upload_id = upload_id
-        for part in parts:
+        # parts defaults to None here; iterating it unguarded raises TypeError at runtime,
+        # so callers must always pass the parts collected from create_multipart_upload.
+        for part in parts:  # type: ignore[union-attr]
             container.register_part(part.part_number, part.etag)
 
         container.finalize(transport=args.transport)
 
-    def abort_multipart_upload(self, local_file, upload_id, artifact_path=None):
+    def abort_multipart_upload(
+        self, local_file: str, upload_id: str, artifact_path: str | None = None
+    ) -> None:
         self._validate_support_mpu()
         from google.resumable_media.requests import XMLMPUContainer
 

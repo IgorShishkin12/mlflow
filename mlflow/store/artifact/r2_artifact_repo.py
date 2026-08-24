@@ -1,3 +1,5 @@
+from collections.abc import Callable
+from typing import Any
 from urllib.parse import urlparse
 
 from mlflow.store.artifact.optimized_s3_artifact_repo import OptimizedS3ArtifactRepository
@@ -9,15 +11,15 @@ class R2ArtifactRepository(OptimizedS3ArtifactRepository):
 
     def __init__(
         self,
-        artifact_uri,
-        access_key_id=None,
-        secret_access_key=None,
-        session_token=None,
-        credential_refresh_def=None,
-        s3_upload_extra_args=None,
-        tracking_uri=None,
+        artifact_uri: str,
+        access_key_id: str | None = None,
+        secret_access_key: str | None = None,
+        session_token: str | None = None,
+        credential_refresh_def: Callable[[], dict[str, Any]] | None = None,
+        s3_upload_extra_args: dict[str, Any] | None = None,
+        tracking_uri: str | None = None,
         registry_uri: str | None = None,
-    ):
+    ) -> None:
         # setup Cloudflare R2 backend to be endpoint_url, otherwise all s3 requests
         # will go to AWS S3 by default
         s3_endpoint_url = self.convert_r2_uri_to_s3_endpoint_url(artifact_uri)
@@ -53,7 +55,7 @@ class R2ArtifactRepository(OptimizedS3ArtifactRepository):
         )
         return temp_client.get_bucket_location(Bucket=self.bucket)["LocationConstraint"]
 
-    def parse_s3_compliant_uri(self, uri):
+    def parse_s3_compliant_uri(self, uri: str) -> tuple[str, str]:
         # r2 uri format(virtual): r2://<bucket-name>@<account-id>.r2.cloudflarestorage.com/<path>
         parsed = urlparse(uri)
         if parsed.scheme != "r2":
@@ -67,7 +69,7 @@ class R2ArtifactRepository(OptimizedS3ArtifactRepository):
         return bucket, path
 
     @staticmethod
-    def convert_r2_uri_to_s3_endpoint_url(r2_uri):
+    def convert_r2_uri_to_s3_endpoint_url(r2_uri: str) -> str:
         host = urlparse(r2_uri).netloc
         host_without_bucket = host.split("@")[-1]
         return f"https://{host_without_bucket}"

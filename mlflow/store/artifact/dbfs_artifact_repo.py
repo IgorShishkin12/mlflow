@@ -1,6 +1,7 @@
 import json
 import os
 import posixpath
+from collections.abc import Callable
 
 import mlflow.utils.databricks_utils
 from mlflow.entities import FileInfo
@@ -23,6 +24,7 @@ from mlflow.utils.databricks_utils import get_databricks_host_creds
 from mlflow.utils.file_utils import relative_path_to_artifact_path
 from mlflow.utils.rest_utils import (
     RESOURCE_NON_EXISTENT,
+    MlflowHostCreds,
     http_request,
     http_request_safe,
 )
@@ -70,7 +72,7 @@ class DbfsRestArtifactRepository(ArtifactRepository):
 
         if databricks_profile_uri := get_databricks_profile_uri_from_artifact_uri(artifact_uri):
             hostcreds_from_uri = get_databricks_host_creds(databricks_profile_uri)
-            self.get_host_creds = lambda: hostcreds_from_uri
+            self.get_host_creds: Callable[[], MlflowHostCreds] = lambda: hostcreds_from_uri
         else:
             self.get_host_creds = _get_host_creds_from_default_store()
 
@@ -116,7 +118,7 @@ class DbfsRestArtifactRepository(ArtifactRepository):
     def _get_dbfs_endpoint(self, artifact_path):
         return f"/dbfs{self._get_dbfs_path(artifact_path)}"
 
-    def log_artifact(self, local_file, artifact_path=None):
+    def log_artifact(self, local_file: str, artifact_path: str | None = None) -> None:
         basename = os.path.basename(local_file)
         if artifact_path:
             http_endpoint = self._get_dbfs_endpoint(posixpath.join(artifact_path, basename))
@@ -135,7 +137,7 @@ class DbfsRestArtifactRepository(ArtifactRepository):
                     endpoint=http_endpoint, method="POST", data=f, allow_redirects=False
                 )
 
-    def log_artifacts(self, local_dir, artifact_path=None):
+    def log_artifacts(self, local_dir: str, artifact_path: str | None = None) -> None:
         artifact_path = artifact_path or ""
         for dirpath, _, filenames in os.walk(local_dir):
             artifact_subdir = artifact_path
@@ -181,7 +183,7 @@ class DbfsRestArtifactRepository(ArtifactRepository):
             output_path=local_path, endpoint=self._get_dbfs_endpoint(remote_file_path)
         )
 
-    def delete_artifacts(self, artifact_path=None):
+    def delete_artifacts(self, artifact_path: str | None = None) -> None:
         raise MlflowException("Not implemented yet")
 
 
@@ -198,7 +200,7 @@ def _get_host_creds_from_default_store():
 
 def dbfs_artifact_repo_factory(
     artifact_uri: str, tracking_uri: str | None = None, registry_uri: str | None = None
-):
+) -> ArtifactRepository:
     """
     Returns an ArtifactRepository subclass for storing artifacts on DBFS.
 

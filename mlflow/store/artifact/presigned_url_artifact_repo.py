@@ -22,6 +22,7 @@ from mlflow.utils.proto_json_utils import message_to_json
 from mlflow.utils.request_utils import augmented_raise_for_status, cloud_storage_http_request
 from mlflow.utils.rest_utils import (
     _REST_API_PATH_PREFIX,
+    MlflowHostCreds,
     call_endpoint,
     extract_api_info_for_service,
 )
@@ -37,19 +38,19 @@ class PresignedUrlArtifactRepository(CloudArtifactRepository):
 
     def __init__(
         self,
-        db_creds,
-        model_full_name,
-        model_version,
+        db_creds: MlflowHostCreds,
+        model_full_name: str,
+        model_version: str,
         tracking_uri: str | None = None,
         registry_uri: str | None = None,
-    ):
+    ) -> None:
         artifact_uri = posixpath.join(
             "/Models", model_full_name.replace(".", "/"), str(model_version)
         )
         super().__init__(artifact_uri, tracking_uri, registry_uri)
         self.db_creds = db_creds
 
-    def log_artifact(self, local_file, artifact_path=None):
+    def log_artifact(self, local_file: str, artifact_path: str | None = None) -> None:
         artifact_file_path = os.path.basename(local_file)
         if artifact_path:
             artifact_file_path = posixpath.join(artifact_path, artifact_file_path)
@@ -103,11 +104,17 @@ class PresignedUrlArtifactRepository(CloudArtifactRepository):
             try_func=try_func, creds_func=creds_func, orig_creds=cloud_credential_info
         )
 
-    def list_artifacts(self, path=""):
+    def list_artifacts(self, path: str | None = "") -> list[FileInfo]:
         infos = []
         page_token = ""
         while True:
-            endpoint = posixpath.join(DIRECTORIES_ENDPOINT, self.artifact_uri.lstrip("/"), path)
+            # ``path`` is a concrete string here in practice (default ""); the Optional comes
+            # from the base-class signature, and join() would reject None outright.
+            endpoint = posixpath.join(
+                DIRECTORIES_ENDPOINT,
+                self.artifact_uri.lstrip("/"),
+                path,  # type: ignore[arg-type]
+            )
             req_body = json.dumps({"page_token": page_token}) if page_token else None
 
             response_proto = ListDirectoryResponse()

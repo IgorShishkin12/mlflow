@@ -7,6 +7,7 @@ import tempfile
 import traceback
 import uuid
 from abc import ABC, ABCMeta, abstractmethod
+from collections.abc import Iterator
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from contextlib import contextmanager
 from pathlib import Path
@@ -17,6 +18,8 @@ from mlflow.entities.multipart_upload import (
     CreateMultipartUploadResponse,
     MultipartUploadPart,
 )
+from mlflow.entities.presigned_download import PresignedDownloadUrlResponse
+from mlflow.entities.presigned_upload import CreatePresignedUploadResponse
 from mlflow.entities.trace_data import TraceData
 from mlflow.exceptions import (
     MlflowException,
@@ -161,13 +164,13 @@ class ArtifactRepository:
     def __init__(
         self, artifact_uri: str, tracking_uri: str | None = None, registry_uri: str | None = None
     ) -> None:
-        self.artifact_uri = artifact_uri
-        self.tracking_uri = tracking_uri
-        self.registry_uri = registry_uri
+        self.artifact_uri: str = artifact_uri
+        self.tracking_uri: str | None = tracking_uri
+        self.registry_uri: str | None = registry_uri
         # Limit the number of threads used for artifact uploads/downloads. Use at most
         # constants._NUM_MAX_THREADS threads or 2 * the number of CPU cores available on the
         # system (whichever is smaller)
-        self.thread_pool = self._create_thread_pool()
+        self.thread_pool: ThreadPoolExecutor = self._create_thread_pool()
 
         def log_artifact_handler(filename, artifact_path=None, artifact=None):
             with tempfile.TemporaryDirectory() as tmp_dir:
@@ -196,7 +199,7 @@ class ArtifactRepository:
             max_workers=self.max_workers, thread_name_prefix=f"Mlflow{self.__class__.__name__}"
         )
 
-    def flush_async_logging(self):
+    def flush_async_logging(self) -> None:
         """
         Flushes the async logging queue, ensuring that all pending logging operations have
         completed.
@@ -205,7 +208,7 @@ class ArtifactRepository:
             self._async_logging_queue.flush()
 
     @abstractmethod
-    def log_artifact(self, local_file, artifact_path=None):
+    def log_artifact(self, local_file: str, artifact_path: str | None = None) -> None:
         """
         Log a local file as an artifact, optionally taking an ``artifact_path`` to place it in
         within the run's artifacts. Run artifacts can be organized into directories, so you can
@@ -244,7 +247,7 @@ class ArtifactRepository:
         )
 
     @abstractmethod
-    def log_artifacts(self, local_dir, artifact_path=None):
+    def log_artifacts(self, local_dir: str, artifact_path: str | None = None) -> None:
         """
         Log the files in the specified local directory as artifacts, optionally taking
         an ``artifact_path`` to place them in within the run's artifacts.
@@ -343,7 +346,7 @@ class ArtifactRepository:
             else:
                 yield file_info
 
-    def download_artifacts(self, artifact_path, dst_path=None):
+    def download_artifacts(self, artifact_path: str, dst_path: str | None = None) -> str:
         """
         Download an artifact file or directory to a local directory if applicable, and return a
         local path for it.
@@ -477,7 +480,7 @@ class ArtifactRepository:
             local_path: The path to which to save the downloaded file.
         """
 
-    def delete_artifacts(self, artifact_path=None):
+    def delete_artifacts(self, artifact_path: str | None = None) -> None:
         """
         Delete the artifacts at the specified location.
         Supports the deletion of a single file or of a directory. Deletion of a directory
@@ -581,7 +584,9 @@ class ArtifactRepository:
             trace_data: The json-serialized trace data to upload.
         """
         with write_local_temp_trace_data_file(trace_data) as temp_file:
-            self.log_artifact(temp_file)
+            # temp_file is a Path; repository implementations hand it to os/open-style APIs
+            # that accept PathLike, so the str-only annotation of log_artifact is safe here.
+            self.log_artifact(temp_file)  # type: ignore[arg-type]
 
     def upload_archived_trace_data(self, trace_data: TraceData) -> None:
         """
@@ -620,11 +625,12 @@ class ArtifactRepository:
         with tempfile.TemporaryDirectory() as temp_dir:
             temp_file = Path(temp_dir, attachment_id)
             temp_file.write_bytes(content_bytes)
-            self.log_artifact(temp_file, artifact_path="attachments")
+            # Path accepted by implementations at runtime despite the str-only annotation.
+            self.log_artifact(temp_file, artifact_path="attachments")  # type: ignore[arg-type]
 
 
 @contextmanager
-def write_local_temp_trace_data_file(trace_data: str):
+def write_local_temp_trace_data_file(trace_data: str) -> Iterator[Path]:
     with tempfile.TemporaryDirectory() as temp_dir:
         temp_file = Path(temp_dir, TRACE_DATA_FILE_NAME)
         temp_file.write_text(trace_data, encoding="utf-8")
@@ -641,17 +647,20 @@ def _write_local_temp_trace_data_pb_file(data: bytes):
         yield temp_file
 
 
-def try_read_trace_data(trace_data_path):
+def try_read_trace_data(trace_data_path: str | Path) -> dict[str, Any]:
+    # This helper legitimately accepts Path (callers pass tempfile results), but the
+    # trace-data exceptions type artifact_path as str only.
     if not os.path.exists(trace_data_path):
-        raise MlflowTraceDataNotFound(artifact_path=trace_data_path)
+        raise MlflowTraceDataNotFound(artifact_path=trace_data_path)  # type: ignore[arg-type]
     with open(trace_data_path, encoding="utf-8") as f:
         data = f.read()
     if not data:
-        raise MlflowTraceDataNotFound(artifact_path=trace_data_path)
+        raise MlflowTraceDataNotFound(artifact_path=trace_data_path)  # type: ignore[arg-type]
     try:
-        return json.loads(data)
+        trace_data: dict[str, Any] = json.loads(data)
+        return trace_data
     except json.decoder.JSONDecodeError as e:
-        raise MlflowTraceDataCorrupted(artifact_path=trace_data_path) from e
+        raise MlflowTraceDataCorrupted(artifact_path=trace_data_path) from e  # type: ignore[arg-type]
 
 
 def _try_read_trace_data_pb(trace_data_path) -> list["Span"]:
@@ -731,7 +740,9 @@ class MultipartDownloadMixin(ABC):
     """
 
     @abstractmethod
-    def get_download_presigned_url(self, artifact_path, expiration=300):
+    def get_download_presigned_url(
+        self, artifact_path: str, expiration: int = 300
+    ) -> PresignedDownloadUrlResponse:
         """
         Generate a presigned URL for downloading an artifact directly from cloud storage.
 
@@ -751,7 +762,9 @@ class PresignedUploadMixin(ABC):
     """
 
     @abstractmethod
-    def create_presigned_upload_url(self, artifact_path, expiration=900):
+    def create_presigned_upload_url(
+        self, artifact_path: str, expiration: int = 900
+    ) -> CreatePresignedUploadResponse:
         """
         Generate a presigned URL for uploading an artifact directly to cloud storage.
 
@@ -809,7 +822,7 @@ class StreamUploadMixin(ABC):
         """
 
 
-def verify_artifact_path(artifact_path):
+def verify_artifact_path(artifact_path: str | None) -> None:
     if artifact_path and path_not_unique(artifact_path):
         raise MlflowException(
             f"Invalid artifact path: '{artifact_path}'. {bad_path_message(artifact_path)}"

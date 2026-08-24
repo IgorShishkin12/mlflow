@@ -2,7 +2,8 @@ import logging
 import os
 import posixpath
 import time
-from concurrent.futures import as_completed
+from concurrent.futures import ThreadPoolExecutor, as_completed
+from typing import Any
 
 import requests
 from requests import HTTPError
@@ -35,6 +36,7 @@ from mlflow.store.artifact.cloud_artifact_repo import _complete_futures, _comput
 from mlflow.utils.credentials import get_default_host_creds
 from mlflow.utils.file_utils import (
     ArtifactProgressBar,
+    _Chunk,
     _yield_chunks,
     read_chunk,
     relative_path_to_artifact_path,
@@ -42,8 +44,14 @@ from mlflow.utils.file_utils import (
 )
 from mlflow.utils.mime_type_utils import _guess_mime_type
 from mlflow.utils.request_utils import download_chunk
-from mlflow.utils.rest_utils import augmented_raise_for_status, http_request
+from mlflow.utils.rest_utils import (  # type: ignore[attr-defined]
+    augmented_raise_for_status,
+    http_request,
+)
 from mlflow.utils.uri import validate_path_is_safe
+
+# augmented_raise_for_status is not explicitly re-exported by rest_utils.__all__,
+# hence the attr-defined ignore on its import above.
 
 _logger = logging.getLogger(__name__)
 
@@ -51,15 +59,21 @@ _logger = logging.getLogger(__name__)
 class HttpArtifactRepository(ArtifactRepository, MultipartUploadMixin):
     """Stores artifacts in a remote artifact storage using HTTP requests"""
 
-    def __init__(self, artifact_uri, tracking_uri=None, registry_uri=None, **kwargs):
+    def __init__(
+        self,
+        artifact_uri: str,
+        tracking_uri: str | None = None,
+        registry_uri: str | None = None,
+        **kwargs: Any,
+    ) -> None:
         super().__init__(artifact_uri, tracking_uri, registry_uri)
         # Lazy-initialized when _multipart_download is first used. Isolated from the
         # inherited thread_pool to avoid deadlocks when a file-download task waits on
         # chunk-download tasks. Not explicitly shut down (consistent with thread_pool).
-        self._chunk_thread_pool = None
+        self._chunk_thread_pool: ThreadPoolExecutor | None = None
 
     @property
-    def chunk_thread_pool(self):
+    def chunk_thread_pool(self) -> ThreadPoolExecutor:
         if self._chunk_thread_pool is None:
             self._chunk_thread_pool = self._create_thread_pool()
         return self._chunk_thread_pool
@@ -77,7 +91,7 @@ class HttpArtifactRepository(ArtifactRepository, MultipartUploadMixin):
             os.path.getsize(local_file) >= MLFLOW_MULTIPART_UPLOAD_MINIMUM_FILE_SIZE.get()
         )
 
-    def log_artifact(self, local_file, artifact_path=None):
+    def log_artifact(self, local_file: str, artifact_path: str | None = None) -> None:
         verify_artifact_path(artifact_path)
 
         if self._should_multipart_upload(local_file):
@@ -98,7 +112,7 @@ class HttpArtifactRepository(ArtifactRepository, MultipartUploadMixin):
             )
             augmented_raise_for_status(resp)
 
-    def log_artifacts(self, local_dir, artifact_path=None):
+    def log_artifacts(self, local_dir: str, artifact_path: str | None = None) -> None:
         local_dir = os.path.abspath(local_dir)
         for root, _, filenames in os.walk(local_dir):
             if root == local_dir:
@@ -112,7 +126,7 @@ class HttpArtifactRepository(ArtifactRepository, MultipartUploadMixin):
             for f in filenames:
                 self.log_artifact(os.path.join(root, f), artifact_dir)
 
-    def list_artifacts(self, path=None):
+    def list_artifacts(self, path: str | None = None) -> list[FileInfo]:
         endpoint = "/mlflow-artifacts/artifacts"
         url, tail = self.artifact_uri.split(endpoint, maxsplit=1)
         root = tail.lstrip("/")
@@ -175,7 +189,7 @@ class HttpArtifactRepository(ArtifactRepository, MultipartUploadMixin):
 
             chunks = list(_yield_chunks(remote_file_path, file_size, chunk_size))
             initial_pass = True
-            failed_downloads = []
+            failed_downloads: list[_Chunk] = []
             max_retries = MLFLOW_HTTP_REQUEST_MAX_RETRIES.get()
             backoff_factor = MLFLOW_HTTP_REQUEST_BACKOFF_FACTOR.get()
             num_retries = max_retries
@@ -272,7 +286,7 @@ class HttpArtifactRepository(ArtifactRepository, MultipartUploadMixin):
         augmented_raise_for_status(resp)
         return PresignedDownloadUrlResponse.from_dict(resp.json())
 
-    def delete_artifacts(self, artifact_path=None):
+    def delete_artifacts(self, artifact_path: str | None = None) -> None:
         endpoint = posixpath.join("/", artifact_path) if artifact_path else "/"
         resp = http_request(self._host_creds, endpoint, "DELETE", stream=True)
         augmented_raise_for_status(resp)
@@ -287,7 +301,9 @@ class HttpArtifactRepository(ArtifactRepository, MultipartUploadMixin):
         )
         return uri, endpoint
 
-    def create_multipart_upload(self, local_file, num_parts=1, artifact_path=None):
+    def create_multipart_upload(
+        self, local_file: str, num_parts: int = 1, artifact_path: str | None = None
+    ) -> CreateMultipartUploadResponse:
         uri, endpoint = self._construct_artifact_uri_and_path(
             "/mlflow-artifacts/mpu/create", artifact_path
         )
@@ -300,7 +316,13 @@ class HttpArtifactRepository(ArtifactRepository, MultipartUploadMixin):
         augmented_raise_for_status(resp)
         return CreateMultipartUploadResponse.from_dict(resp.json())
 
-    def complete_multipart_upload(self, local_file, upload_id, parts=None, artifact_path=None):
+    def complete_multipart_upload(
+        self,
+        local_file: str,
+        upload_id: str,
+        parts: list[MultipartUploadPart] | None = None,
+        artifact_path: str | None = None,
+    ) -> None:
         uri, endpoint = self._construct_artifact_uri_and_path(
             "/mlflow-artifacts/mpu/complete", artifact_path
         )
@@ -308,12 +330,16 @@ class HttpArtifactRepository(ArtifactRepository, MultipartUploadMixin):
         params = {
             "path": local_file,
             "upload_id": upload_id,
-            "parts": [part.to_dict() for part in parts],
+            # parts defaults to None here; iterating it unguarded raises TypeError at
+            # runtime, so callers must always pass the collected parts.
+            "parts": [part.to_dict() for part in parts],  # type: ignore[union-attr]
         }
         resp = http_request(host_creds, endpoint, "POST", json=params)
         augmented_raise_for_status(resp)
 
-    def abort_multipart_upload(self, local_file, upload_id, artifact_path=None):
+    def abort_multipart_upload(
+        self, local_file: str, upload_id: str, artifact_path: str | None = None
+    ) -> None:
         uri, endpoint = self._construct_artifact_uri_and_path(
             "/mlflow-artifacts/mpu/abort", artifact_path
         )
@@ -353,8 +379,9 @@ class HttpArtifactRepository(ArtifactRepository, MultipartUploadMixin):
         try:
             create = self.create_multipart_upload(local_file, num_parts, artifact_path)
         except HTTPError as e:
-            # return False if server does not support multipart upload
-            error_message = e.response.json().get("message", "")
+            # HTTPError raised by raise_for_status always carries its response, but
+            # requests types it as Optional.
+            error_message = e.response.json().get("message", "")  # type: ignore[union-attr]
             if isinstance(error_message, str) and error_message.startswith(
                 _UnsupportedMultipartUploadException.MESSAGE
             ):
@@ -380,8 +407,19 @@ class HttpArtifactRepository(ArtifactRepository, MultipartUploadMixin):
                 )
 
             parts = sorted(parts.values(), key=lambda part: part.part_number)
-            self.complete_multipart_upload(local_file, create.upload_id, parts, artifact_path)
+            # The server always returns an upload_id for this repository; the entity types
+            # it as str | None because other backends (e.g. Azure Blob) need not mint one.
+            self.complete_multipart_upload(
+                local_file,
+                create.upload_id,  # type: ignore[arg-type]
+                parts,
+                artifact_path,
+            )
         except Exception as e:
-            self.abort_multipart_upload(local_file, create.upload_id, artifact_path)
+            self.abort_multipart_upload(
+                local_file,
+                create.upload_id,  # type: ignore[arg-type]
+                artifact_path,
+            )
             _logger.warning(f"Failed to upload file {local_file} using multipart upload: {e}")
             raise

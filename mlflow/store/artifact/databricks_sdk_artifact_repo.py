@@ -2,7 +2,7 @@ import logging
 import posixpath
 from concurrent.futures import Future
 from pathlib import Path
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, BinaryIO, cast
 
 from packaging.version import Version
 
@@ -13,6 +13,7 @@ from mlflow.store.artifact.artifact_repo import ArtifactRepository
 from mlflow.utils import get_installed_version
 
 if TYPE_CHECKING:
+    from databricks.sdk import WorkspaceClient
     from databricks.sdk.service.files import FilesAPI
 
 
@@ -58,7 +59,7 @@ class DatabricksSdkArtifactRepository(ArtifactRepository):
                 )
             except AttributeError:
                 _logger.debug("Failed to set multipart_upload_chunk_size in Config", exc_info=True)
-        self.wc = wc
+        self.wc: "WorkspaceClient" = wc
 
     @property
     def files_api(self) -> "FilesAPI":
@@ -93,18 +94,18 @@ class DatabricksSdkArtifactRepository(ArtifactRepository):
             )
 
     def log_artifacts(self, local_dir: str, artifact_path: str | None = None) -> None:
-        local_dir = Path(local_dir).resolve()
+        root_dir = Path(local_dir).resolve()
         futures: list[Future[None]] = []
         with self._create_thread_pool() as executor:
-            for f in local_dir.rglob("*"):
+            for f in root_dir.rglob("*"):
                 if not f.is_file():
                     continue
 
                 paths: list[str] = []
                 if artifact_path:
                     paths.append(artifact_path)
-                if f.parent != local_dir:
-                    paths.append(str(f.parent.relative_to(local_dir)))
+                if f.parent != root_dir:
+                    paths.append(str(f.parent.relative_to(root_dir)))
 
                 fut = executor.submit(
                     self.log_artifact,
@@ -123,11 +124,15 @@ class DatabricksSdkArtifactRepository(ArtifactRepository):
 
         file_infos: list[FileInfo] = []
         for directory_entry in self.files_api.list_directory_contents(dest_path):
-            relative_path = posixpath.relpath(directory_entry.path, self.artifact_uri)
+            # The SDK types these fields Optional, but they are always populated on entries
+            # returned by list_directory_contents.
+            entry_path = cast(str, directory_entry.path)
+            is_dir = cast(bool, directory_entry.is_directory)
+            relative_path = posixpath.relpath(entry_path, self.artifact_uri)
             file_infos.append(
                 FileInfo(
                     path=relative_path,
-                    is_dir=directory_entry.is_directory,
+                    is_dir=is_dir,
                     file_size=directory_entry.file_size,
                 )
             )
@@ -136,6 +141,8 @@ class DatabricksSdkArtifactRepository(ArtifactRepository):
 
     def _download_file(self, remote_file_path: str, local_path: str) -> None:
         download_resp = self.files_api.download(self.full_path(remote_file_path))
+        # The SDK types `contents` Optional, but it is always set on a successful download.
+        contents = cast(BinaryIO, download_resp.contents)
         with open(local_path, "wb") as f:
-            while chunk := download_resp.contents.read(10 * 1024 * 1024):
+            while chunk := contents.read(10 * 1024 * 1024):
                 f.write(chunk)

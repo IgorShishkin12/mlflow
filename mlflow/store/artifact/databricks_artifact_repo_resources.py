@@ -51,7 +51,7 @@ class ListArtifactsPage:
     next_page_token: str | None = None
 
     @classmethod
-    def empty(cls):
+    def empty(cls) -> "ListArtifactsPage":
         return cls(files=[], next_page_token=None)
 
 
@@ -61,11 +61,11 @@ class _Resource(ABC):
     """
 
     def __init__(self, id_: str, artifact_uri: str, call_endpoint: Callable[..., Any]):
-        self.id = id_
-        self.artifact_uri = artifact_uri
+        self.id: str = id_
+        self.artifact_uri: str = artifact_uri
         self._call_endpoint = call_endpoint
-        self._artifact_root = None
-        self._relative_path = None
+        self._artifact_root: str | None = None
+        self._relative_path: str | None = None
 
     @property
     def call_endpoint(self) -> Callable[..., Any]:
@@ -100,6 +100,8 @@ class _Resource(ABC):
         cred_type: _CredentialType,
         paths: list[str] | None = None,
         page_token: str | None = None,
+        timeout: int | None = None,
+        artifact_path: str | None = None,
     ) -> tuple[list[ArtifactCredentialInfo], str | None]:
         """
         Fetches read/write credentials for the specified paths.
@@ -143,6 +145,8 @@ class _LoggedModel(_Resource):
         cred_type: _CredentialType,
         paths: list[str] | None = None,
         page_token: str | None = None,
+        timeout: int | None = None,
+        artifact_path: str | None = None,
     ) -> tuple[list[ArtifactCredentialInfo], str | None]:
         api = (
             GetCredentialsForLoggedModelDownload
@@ -171,7 +175,9 @@ class _LoggedModel(_Resource):
         response = self.call_endpoint(
             MlflowService, GetLoggedModel, json_body, path_params={"model_id": self.id}
         )
-        return response.model.info.artifact_uri
+        # Protobuf field access is untyped; pin the declared type instead of returning Any.
+        artifact_uri: str = response.model.info.artifact_uri
+        return artifact_uri
 
     def _list_artifacts(
         self,
@@ -211,6 +217,8 @@ class _Run(_Resource):
         cred_type: _CredentialType,
         paths: list[str] | None = None,
         page_token: str | None = None,
+        timeout: int | None = None,
+        artifact_path: str | None = None,
     ) -> tuple[list[ArtifactCredentialInfo], str | None]:
         api = GetCredentialsForRead if cred_type == _CredentialType.READ else GetCredentialsForWrite
         json_body = api(run_id=self.id, path=paths, page_token=page_token)
@@ -230,7 +238,9 @@ class _Run(_Resource):
     def get_artifact_root(self) -> str:
         json_body = message_to_json(GetRun(run_id=self.id))
         run_response = self.call_endpoint(MlflowService, GetRun, json_body)
-        return run_response.run.info.artifact_uri
+        # Protobuf field access is untyped; pin the declared type instead of returning Any.
+        artifact_uri: str = run_response.run.info.artifact_uri
+        return artifact_uri
 
     def _list_artifacts(
         self,
@@ -264,7 +274,9 @@ class _Run(_Resource):
 
 class _Trace(_Resource):
     def get_artifact_root(self) -> str:
-        return None
+        # Dead code: this method is immediately redefined below, and that definition is
+        # the one Python keeps. The body is preserved verbatim.
+        return None  # type: ignore[return-value]  # unreachable: superseded by the def below
 
     def get_credentials(
         self,
@@ -294,7 +306,9 @@ class _Trace(_Resource):
         )
         return [cred_inf], None
 
-    def get_artifact_root(self) -> str:
+    # Duplicate definition kept intentionally (this is the one that wins at runtime);
+    # the shadowed definition above is retained rather than deleted.
+    def get_artifact_root(self) -> str:  # type: ignore[no-redef]
         raise NotImplementedError
 
     def _list_artifacts(

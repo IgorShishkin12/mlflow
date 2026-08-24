@@ -11,7 +11,7 @@ _logger = logging.getLogger(__name__)
 
 
 @click.group("artifacts")
-def commands():
+def commands() -> None:
     """
     Upload, list, and download artifacts from an MLflow artifact repository.
 
@@ -29,7 +29,7 @@ def commands():
     help="If specified, we will log the artifact into this subdirectory of the "
     + "run's artifact directory.",
 )
-def log_artifact(local_file, run_id, artifact_path):
+def log_artifact(local_file: str, run_id: str, artifact_path: str | None) -> None:
     """
     Log a local file as an artifact of a run, optionally within a run-specific
     artifact path. Run artifacts can be organized into directories, so you can
@@ -53,7 +53,7 @@ def log_artifact(local_file, run_id, artifact_path):
     help="If specified, we will log the artifact into this subdirectory of the "
     + "run's artifact directory.",
 )
-def log_artifacts(local_dir, run_id, artifact_path):
+def log_artifacts(local_dir: str, run_id: str, artifact_path: str | None) -> None:
     """
     Log the files within a local directory as an artifact of a run, optionally
     within a run-specific artifact path. Run artifacts can be organized into
@@ -73,7 +73,7 @@ def log_artifacts(local_dir, run_id, artifact_path):
     "-a",
     help="If specified, a path relative to the run's root directory to list.",
 )
-def list_artifacts(run_id, artifact_path):
+def list_artifacts(run_id: str, artifact_path: str | None) -> None:
     """
     Return all the artifacts directly under run's root artifact directory,
     or a sub-directory. The output is a JSON-formatted list.
@@ -116,7 +116,12 @@ def _file_infos_to_json(file_infos):
         " path is returned directly"
     ),
 )
-def download_artifacts(run_id, artifact_path, artifact_uri, dst_path):
+def download_artifacts(
+    run_id: str | None,
+    artifact_path: str | None,
+    artifact_uri: str | None,
+    dst_path: str | None,
+) -> None:
     """
     Download an artifact file or directory to a local directory.
     The output is the name of the file or directory on the local filesystem.

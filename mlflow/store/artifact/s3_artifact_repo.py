@@ -7,13 +7,16 @@ from datetime import datetime, timezone
 from functools import lru_cache
 from io import BytesIO
 from mimetypes import guess_type
+from typing import Any
 
 from mlflow.entities import FileInfo
 from mlflow.entities.multipart_upload import (
     CreateMultipartUploadResponse,
     MultipartUploadCredential,
+    MultipartUploadPart,
 )
 from mlflow.entities.presigned_download import PresignedDownloadUrlResponse
+from mlflow.entities.presigned_upload import CreatePresignedUploadResponse
 from mlflow.environment_variables import (
     MLFLOW_BOTO_CLIENT_ADDRESSING_STYLE,
     MLFLOW_S3_ENDPOINT_URL,
@@ -251,9 +254,9 @@ class S3ArtifactRepository(
     def __init__(
         self,
         artifact_uri: str,
-        access_key_id=None,
-        secret_access_key=None,
-        session_token=None,
+        access_key_id: str | None = None,
+        secret_access_key: str | None = None,
+        session_token: str | None = None,
         tracking_uri: str | None = None,
         registry_uri: str | None = None,
     ) -> None:
@@ -291,7 +294,7 @@ class S3ArtifactRepository(
             session_token=self._session_token,
         )
 
-    def parse_s3_compliant_uri(self, uri):
+    def parse_s3_compliant_uri(self, uri: str) -> tuple[str, str]:
         """
         Parse an S3 URI into bucket and path components.
 
@@ -311,7 +314,7 @@ class S3ArtifactRepository(
         return parsed.netloc, path
 
     @staticmethod
-    def get_s3_file_upload_extra_args():
+    def get_s3_file_upload_extra_args() -> dict[str, Any] | None:
         """
         Get additional S3 upload arguments from environment variables.
 
@@ -324,7 +327,8 @@ class S3ArtifactRepository(
                 for S3 uploads (e.g., '{"ServerSideEncryption": "AES256"}')
         """
         if s3_file_upload_extra_args := MLFLOW_S3_UPLOAD_EXTRA_ARGS.get():
-            return json.loads(s3_file_upload_extra_args)
+            extra_args: dict[str, Any] | None = json.loads(s3_file_upload_extra_args)
+            return extra_args
         else:
             return None
 
@@ -341,7 +345,7 @@ class S3ArtifactRepository(
             extra_args.update(environ_extra_args)
         s3_client.upload_file(Filename=local_file, Bucket=bucket, Key=key, ExtraArgs=extra_args)
 
-    def log_artifact(self, local_file, artifact_path=None):
+    def log_artifact(self, local_file: str, artifact_path: str | None = None) -> None:
         """
         Log a local file as an artifact to S3.
 
@@ -363,7 +367,7 @@ class S3ArtifactRepository(
             s3_client=self._get_s3_client(), local_file=local_file, bucket=bucket, key=dest_path
         )
 
-    def log_artifacts(self, local_dir, artifact_path=None):
+    def log_artifacts(self, local_dir: str, artifact_path: str | None = None) -> None:
         """
         Log all files in a local directory as artifacts to S3.
 
@@ -453,7 +457,7 @@ class S3ArtifactRepository(
                 error_code=mlflow_error_code,
             )
 
-    def list_artifacts(self, path=None):
+    def list_artifacts(self, path: str | None = None) -> list[FileInfo]:
         """
         List all artifacts directly under the specified S3 path.
 
@@ -532,7 +536,7 @@ class S3ArtifactRepository(
         )
         s3_client.download_file(bucket, s3_full_path, local_path, **download_kwargs)
 
-    def delete_artifacts(self, artifact_path=None):
+    def delete_artifacts(self, artifact_path: str | None = None) -> None:
         (bucket, dest_path) = self.parse_s3_compliant_uri(self.artifact_uri)
         if artifact_path:
             dest_path = posixpath.join(dest_path, artifact_path)
@@ -555,7 +559,9 @@ class S3ArtifactRepository(
                     Bucket=bucket, Delete={"Objects": keys}, **self._bucket_owner_params
                 )
 
-    def create_multipart_upload(self, local_file, num_parts=1, artifact_path=None):
+    def create_multipart_upload(
+        self, local_file: str, num_parts: int = 1, artifact_path: str | None = None
+    ) -> CreateMultipartUploadResponse:
         """
         Initiate a multipart upload for efficient large file uploads to S3.
 
@@ -613,7 +619,13 @@ class S3ArtifactRepository(
             upload_id=upload_id,
         )
 
-    def complete_multipart_upload(self, local_file, upload_id, parts=None, artifact_path=None):
+    def complete_multipart_upload(
+        self,
+        local_file: str,
+        upload_id: str,
+        parts: list[MultipartUploadPart],
+        artifact_path: str | None = None,
+    ) -> None:
         """
         Complete a multipart upload by combining all parts into a single S3 object.
 
@@ -635,17 +647,19 @@ class S3ArtifactRepository(
         if artifact_path:
             dest_path = posixpath.join(dest_path, artifact_path)
         dest_path = posixpath.join(dest_path, os.path.basename(local_file))
-        parts = [{"PartNumber": part.part_number, "ETag": part.etag} for part in parts]
+        serialized_parts = [{"PartNumber": p.part_number, "ETag": p.etag} for p in parts]
         s3_client = self._get_s3_client()
         s3_client.complete_multipart_upload(
             Bucket=bucket,
             Key=dest_path,
             UploadId=upload_id,
-            MultipartUpload={"Parts": parts},
+            MultipartUpload={"Parts": serialized_parts},
             **self._bucket_owner_params,
         )
 
-    def abort_multipart_upload(self, local_file, upload_id, artifact_path=None):
+    def abort_multipart_upload(
+        self, local_file: str, upload_id: str, artifact_path: str | None = None
+    ) -> None:
         """
         Abort a multipart upload and clean up any uploaded parts.
 
@@ -672,7 +686,9 @@ class S3ArtifactRepository(
             **self._bucket_owner_params,
         )
 
-    def create_presigned_upload_url(self, artifact_path, expiration=900):
+    def create_presigned_upload_url(
+        self, artifact_path: str, expiration: int = 900
+    ) -> CreatePresignedUploadResponse:
         """
         Generate a presigned URL for uploading an artifact directly to S3.
 
@@ -684,8 +700,6 @@ class S3ArtifactRepository(
         Returns:
             CreatePresignedUploadResponse with presigned_url and headers.
         """
-        from mlflow.entities.presigned_upload import CreatePresignedUploadResponse
-
         (bucket, dest_path) = self.parse_s3_compliant_uri(self.artifact_uri)
         dest_path = posixpath.join(dest_path, artifact_path)
 
@@ -739,7 +753,9 @@ class S3ArtifactRepository(
             headers=headers,
         )
 
-    def get_download_presigned_url(self, artifact_path, expiration=300):
+    def get_download_presigned_url(
+        self, artifact_path: str, expiration: int = 300
+    ) -> PresignedDownloadUrlResponse:
         """Generate a presigned URL for downloading an artifact directly from S3."""
         from botocore.exceptions import ClientError
 

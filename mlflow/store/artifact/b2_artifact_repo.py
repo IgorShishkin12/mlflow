@@ -1,3 +1,5 @@
+from collections.abc import Callable
+from typing import Any, cast
 from urllib.parse import urlparse
 
 from mlflow.store.artifact.optimized_s3_artifact_repo import OptimizedS3ArtifactRepository
@@ -17,15 +19,15 @@ class B2ArtifactRepository(OptimizedS3ArtifactRepository):
 
     def __init__(
         self,
-        artifact_uri,
-        access_key_id=None,
-        secret_access_key=None,
-        session_token=None,
-        credential_refresh_def=None,
-        s3_upload_extra_args=None,
-        tracking_uri=None,
+        artifact_uri: str,
+        access_key_id: str | None = None,
+        secret_access_key: str | None = None,
+        session_token: str | None = None,
+        credential_refresh_def: Callable[[], dict[str, Any]] | None = None,
+        s3_upload_extra_args: dict[str, Any] | None = None,
+        tracking_uri: str | None = None,
         registry_uri: str | None = None,
-    ):
+    ) -> None:
         s3_endpoint_url = self.convert_b2_uri_to_s3_endpoint_url(artifact_uri)
         self._access_key_id = access_key_id
         self._secret_access_key = secret_access_key
@@ -52,7 +54,9 @@ class B2ArtifactRepository(OptimizedS3ArtifactRepository):
 
     def _get_region_name(self):
         # Parse region from the endpoint URL (e.g. https://s3.us-west-004.backblazeb2.com)
-        host = urlparse(self._s3_endpoint_url).hostname
+        # convert_b2_uri_to_s3_endpoint_url always embeds a hostname; a malformed endpoint would
+        # already fall through to the exception below.
+        host = cast(str, urlparse(self._s3_endpoint_url).hostname)
         match host.split("."):
             case ["s3", region, "backblazeb2", "com"]:
                 return region
@@ -70,7 +74,7 @@ class B2ArtifactRepository(OptimizedS3ArtifactRepository):
         )
         return self._register_b2_user_agent(client)
 
-    def parse_s3_compliant_uri(self, uri):
+    def parse_s3_compliant_uri(self, uri: str) -> tuple[str, str]:
         # b2 uri format: b2://<bucket-name>@<endpoint-host>/path
         parsed = urlparse(uri)
         if parsed.scheme != "b2":
@@ -84,7 +88,7 @@ class B2ArtifactRepository(OptimizedS3ArtifactRepository):
         return bucket, path
 
     @staticmethod
-    def convert_b2_uri_to_s3_endpoint_url(b2_uri):
+    def convert_b2_uri_to_s3_endpoint_url(b2_uri: str) -> str:
         host = urlparse(b2_uri).netloc
         host_without_bucket = host.split("@")[-1]
         return f"https://{host_without_bucket}"

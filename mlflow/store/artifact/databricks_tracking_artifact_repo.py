@@ -41,8 +41,12 @@ class DatabricksTrackingArtifactRepository(ArtifactRepository, ABC):
         experiment_id = m.group("experiment_id")
         relative_path = m.group("relative_path") or ""
         root_path = self._build_root_path(experiment_id, m, relative_path)
-        self.databricks_sdk_repo = DatabricksSdkArtifactRepository(root_path)
-        self.databricks_artifact_repo = DatabricksArtifactRepository(artifact_uri)
+        self.databricks_sdk_repo: DatabricksSdkArtifactRepository = DatabricksSdkArtifactRepository(
+            root_path
+        )
+        self.databricks_artifact_repo: DatabricksArtifactRepository = DatabricksArtifactRepository(
+            artifact_uri
+        )
 
     @abstractmethod
     def _get_uri_regex(self) -> re.Pattern[str]:
@@ -53,7 +57,7 @@ class DatabricksTrackingArtifactRepository(ArtifactRepository, ABC):
         """Return a description of the expected URI format."""
 
     @abstractmethod
-    def _build_root_path(self, experiment_id: str, match: re.Match, relative_path: str) -> str:
+    def _build_root_path(self, experiment_id: str, match: re.Match[str], relative_path: str) -> str:
         """Build the root path for the Databricks SDK repository."""
 
     def log_artifact(self, local_file: str, artifact_path: str | None = None) -> None:

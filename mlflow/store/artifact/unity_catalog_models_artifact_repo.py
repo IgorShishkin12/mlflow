@@ -1,5 +1,6 @@
 import base64
 
+from mlflow.entities import FileInfo
 from mlflow.environment_variables import MLFLOW_ENABLE_UC_NATIVE_MODEL_REGISTRY
 from mlflow.exceptions import MlflowException
 from mlflow.protos.databricks_pb2 import INVALID_PARAMETER_VALUE
@@ -7,6 +8,7 @@ from mlflow.protos.databricks_uc_registry_messages_pb2 import (
     MODEL_VERSION_OPERATION_READ,
     GenerateTemporaryModelVersionCredentialsRequest,
     GenerateTemporaryModelVersionCredentialsResponse,
+    LineageHeaderInfo,
     ModelVersionLineageDirection,
     StorageMode,
 )
@@ -67,7 +69,9 @@ class UnityCatalogModelsArtifactRepository(ArtifactRepository):
     when the client is pointing to a Unity Catalog model registry.
     """
 
-    def __init__(self, artifact_uri, registry_uri, tracking_uri: str | None = None):
+    def __init__(
+        self, artifact_uri: str, registry_uri: str, tracking_uri: str | None = None
+    ) -> None:
         if not is_databricks_unity_catalog_uri(registry_uri):
             raise MlflowException(
                 message="Attempted to instantiate an artifact repo to access models in the "
@@ -100,8 +104,9 @@ class UnityCatalogModelsArtifactRepository(ArtifactRepository):
             spark = _get_active_spark_session()
         except Exception:
             pass
-        model_name, self.model_version = get_model_name_and_version(self.client, artifact_uri)
-        self.model_name = get_full_name_from_sc(model_name, spark)
+        model_name, model_version = get_model_name_and_version(self.client, artifact_uri)
+        self.model_version: str = model_version
+        self.model_name: str = get_full_name_from_sc(model_name, spark)
 
     def _get_blob_storage_path(self):
         return self.client.get_model_version_download_uri(self.model_name, self.model_version)
@@ -198,19 +203,27 @@ class UnityCatalogModelsArtifactRepository(ArtifactRepository):
             base_credential_refresh_def=self._get_scoped_token,
         )
 
-    def list_artifacts(self, path=None):
-        return self._get_artifact_repo().list_artifacts(path=path)
+    def list_artifacts(self, path: str | None = None) -> list[FileInfo]:
+        # _get_artifact_repo is unannotated, so bind the delegated result to the declared type.
+        file_infos: list[FileInfo] = self._get_artifact_repo().list_artifacts(path=path)
+        return file_infos
 
-    def download_artifacts(self, artifact_path, dst_path=None, lineage_header_info=None):
-        return self._get_artifact_repo(lineage_header_info=lineage_header_info).download_artifacts(
-            artifact_path, dst_path
-        )
+    def download_artifacts(
+        self,
+        artifact_path: str,
+        dst_path: str | None = None,
+        lineage_header_info: LineageHeaderInfo | None = None,
+    ) -> str:
+        downloaded: str = self._get_artifact_repo(
+            lineage_header_info=lineage_header_info
+        ).download_artifacts(artifact_path, dst_path)
+        return downloaded
 
-    def log_artifact(self, local_file, artifact_path=None):
+    def log_artifact(self, local_file: str, artifact_path: str | None = None) -> None:
         raise MlflowException("This repository does not support logging artifacts.")
 
-    def log_artifacts(self, local_dir, artifact_path=None):
+    def log_artifacts(self, local_dir: str, artifact_path: str | None = None) -> None:
         raise MlflowException("This repository does not support logging artifacts.")
 
-    def delete_artifacts(self, artifact_path=None):
+    def delete_artifacts(self, artifact_path: str | None = None) -> None:
         raise NotImplementedError("This artifact repository does not support deleting artifacts")

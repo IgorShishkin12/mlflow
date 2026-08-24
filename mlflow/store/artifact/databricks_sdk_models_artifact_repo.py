@@ -1,11 +1,15 @@
 import logging
 import posixpath
+from typing import TYPE_CHECKING, BinaryIO, cast
 
 from mlflow.entities import FileInfo
 from mlflow.environment_variables import (
     MLFLOW_MULTIPART_DOWNLOAD_CHUNK_SIZE,
 )
 from mlflow.store.artifact.cloud_artifact_repo import CloudArtifactRepository
+
+if TYPE_CHECKING:
+    from databricks.sdk import WorkspaceClient
 
 _logger = logging.getLogger(__name__)
 
@@ -43,15 +47,15 @@ class DatabricksSDKModelsArtifactRepository(CloudArtifactRepository):
 
     def __init__(
         self,
-        model_name,
-        model_version,
+        model_name: str,
+        model_version: str,
         tracking_uri: str | None = None,
         registry_uri: str | None = None,
-    ):
-        self.model_name = model_name
-        self.model_version = model_version
-        self.model_base_path = f"/Models/{model_name.replace('.', '/')}/{model_version}"
-        self.client = _get_databricks_workspace_client(registry_uri)
+    ) -> None:
+        self.model_name: str = model_name
+        self.model_version: str = model_version
+        self.model_base_path: str = f"/Models/{model_name.replace('.', '/')}/{model_version}"
+        self.client: "WorkspaceClient" = _get_databricks_workspace_client(registry_uri)
         super().__init__(self.model_base_path, tracking_uri, registry_uri)
 
     def list_artifacts(self, path: str | None = None) -> list[FileInfo]:
@@ -59,7 +63,7 @@ class DatabricksSDKModelsArtifactRepository(CloudArtifactRepository):
         if path:
             dest_path = posixpath.join(dest_path, path)
 
-        file_infos = []
+        file_infos: list[FileInfo] = []
 
         # check if dest_path is file, if so return empty dir
         if not self._is_dir(dest_path):
@@ -67,11 +71,15 @@ class DatabricksSDKModelsArtifactRepository(CloudArtifactRepository):
 
         resp = self.client.files.list_directory_contents(dest_path)
         for directory_entry in resp:
-            relative_path = posixpath.relpath(directory_entry.path, self.model_base_path)
+            # The SDK types these fields Optional, but they are always populated on entries
+            # returned by list_directory_contents.
+            entry_path = cast(str, directory_entry.path)
+            is_dir = cast(bool, directory_entry.is_directory)
+            relative_path = posixpath.relpath(entry_path, self.model_base_path)
             file_infos.append(
                 FileInfo(
                     path=relative_path,
-                    is_dir=directory_entry.is_directory,
+                    is_dir=is_dir,
                     file_size=directory_entry.file_size,
                 )
             )
@@ -95,7 +103,7 @@ class DatabricksSDKModelsArtifactRepository(CloudArtifactRepository):
         with open(src_file_path, "rb") as f:
             self.client.files.upload(dest_path, f, overwrite=True)
 
-    def log_artifact(self, local_file, artifact_path=None):
+    def log_artifact(self, local_file: str, artifact_path: str | None = None) -> None:
         self._upload_to_cloud(
             cloud_credential_info=None,
             src_file_path=local_file,
@@ -108,7 +116,8 @@ class DatabricksSDKModelsArtifactRepository(CloudArtifactRepository):
             dest_path = posixpath.join(dest_path, remote_file_path)
 
         resp = self.client.files.download(dest_path)
-        contents = resp.contents
+        # The SDK types `contents` Optional, but it is always set on a successful download.
+        contents = cast(BinaryIO, resp.contents)
         chunk_size = MLFLOW_MULTIPART_DOWNLOAD_CHUNK_SIZE.get()
 
         with open(local_path, "wb") as f:

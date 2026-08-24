@@ -4,7 +4,9 @@ import urllib.parse
 from pathlib import Path
 
 import mlflow
+from mlflow.entities.file_info import FileInfo
 from mlflow.exceptions import MlflowException
+from mlflow.protos.databricks_uc_registry_messages_pb2 import LineageHeaderInfo
 from mlflow.store.artifact.artifact_repo import ArtifactRepository
 from mlflow.store.artifact.databricks_models_artifact_repo import DatabricksModelsArtifactRepository
 from mlflow.store.artifact.unity_catalog_models_artifact_repo import (
@@ -49,32 +51,41 @@ class ModelsArtifactRepository(ArtifactRepository):
         super().__init__(artifact_uri, tracking_uri, registry_uri)
         registry_uri = registry_uri or mlflow.get_registry_uri()
         self.is_logged_model_uri = self._is_logged_model_uri(artifact_uri)
+        # The concrete repository class differs by branch; declare at the base type up front so
+        # every branch can assign its own subclass.
+        self.repo: ArtifactRepository
+        # ArtifactRepository declares ``_download_file`` as abstract, but its ABCMeta declaration
+        # is Python 2-style (``__metaclass__``) and never takes effect, so instantiating these
+        # repositories — which delegate downloads to an underlying repo — works at runtime.
         if is_databricks_unity_catalog_uri(uri=registry_uri) and not self.is_logged_model_uri:
-            self.repo = UnityCatalogModelsArtifactRepository(
+            uc_repo = UnityCatalogModelsArtifactRepository(  # type: ignore[abstract]
                 artifact_uri=artifact_uri,
                 registry_uri=registry_uri,
                 tracking_uri=tracking_uri,
             )
-            self.model_name = self.repo.model_name
-            self.model_version = self.repo.model_version
+            self.model_name = uc_repo.model_name
+            self.model_version = uc_repo.model_version
+            self.repo = uc_repo
         elif is_oss_unity_catalog_uri(uri=registry_uri) and not self.is_logged_model_uri:
-            self.repo = UnityCatalogOSSModelsArtifactRepository(
+            oss_repo = UnityCatalogOSSModelsArtifactRepository(  # type: ignore[abstract]
                 artifact_uri=artifact_uri,
                 registry_uri=registry_uri,
                 tracking_uri=tracking_uri,
             )
-            self.model_name = self.repo.model_name
-            self.model_version = self.repo.model_version
+            self.model_name = oss_repo.model_name
+            self.model_version = oss_repo.model_version
+            self.repo = oss_repo
         elif (
             is_using_databricks_registry(artifact_uri, registry_uri)
             and not self.is_logged_model_uri
         ):
             # Use the DatabricksModelsArtifactRepository if a databricks profile is being used.
-            self.repo = DatabricksModelsArtifactRepository(
+            db_repo = DatabricksModelsArtifactRepository(
                 artifact_uri, tracking_uri=tracking_uri, registry_uri=registry_uri
             )
-            self.model_name = self.repo.model_name
-            self.model_version = self.repo.model_version
+            self.model_name = db_repo.model_name
+            self.model_version = db_repo.model_version
+            self.repo = db_repo
         else:
             (
                 self.model_name,
@@ -88,11 +99,11 @@ class ModelsArtifactRepository(ArtifactRepository):
             #  we don't get a download URI here, or fail during the download itself.
 
     @staticmethod
-    def is_models_uri(uri):
+    def is_models_uri(uri: str) -> bool:
         return urllib.parse.urlparse(uri).scheme == "models"
 
     @staticmethod
-    def split_models_uri(uri):
+    def split_models_uri(uri: str) -> tuple[str, str]:
         """
         Split 'models:/<name>/<version>/path/to/model' into
         ('models:/<name>/<version>', 'path/to/model').
@@ -150,12 +161,13 @@ class ModelsArtifactRepository(ArtifactRepository):
         )
 
     @staticmethod
-    def get_underlying_uri(uri):
+    def get_underlying_uri(uri: str) -> str:
+        # _get_model_uri_infos is unannotated, so bind the underlying URI to the declared type.
+        underlying_uri: str
         _, _, underlying_uri = ModelsArtifactRepository._get_model_uri_infos(uri)
-
         return underlying_uri
 
-    def log_artifact(self, local_file, artifact_path=None):
+    def log_artifact(self, local_file: str, artifact_path: str | None = None) -> None:
         """
         Log a local file as an artifact, optionally taking an ``artifact_path`` to place it in
         within the run's artifacts. Run artifacts can be organized into directories, so you can
@@ -173,7 +185,7 @@ class ModelsArtifactRepository(ArtifactRepository):
             "Use register_model instead."
         )
 
-    def log_artifacts(self, local_dir, artifact_path=None):
+    def log_artifacts(self, local_dir: str, artifact_path: str | None = None) -> None:
         """
         Log the files in the specified local directory as artifacts, optionally taking
         an ``artifact_path`` to place them in within the run's artifacts.
@@ -190,7 +202,7 @@ class ModelsArtifactRepository(ArtifactRepository):
             "Use register_model instead."
         )
 
-    def list_artifacts(self, path):
+    def list_artifacts(self, path: str | None = None) -> list[FileInfo]:
         """
         Return all the artifacts for this run_id directly under path. If path is a file, returns
         an empty list. Will error if path is neither a file nor directory.
@@ -217,7 +229,12 @@ class ModelsArtifactRepository(ArtifactRepository):
             ensure_yaml_extension=False,
         )
 
-    def download_artifacts(self, artifact_path, dst_path=None, lineage_header_info=None):
+    def download_artifacts(
+        self,
+        artifact_path: str,
+        dst_path: str | None = None,
+        lineage_header_info: LineageHeaderInfo | None = None,
+    ) -> str:
         """
         Download an artifact file or directory to a local directory if applicable, and return a
         local path for it.
@@ -267,5 +284,5 @@ class ModelsArtifactRepository(ArtifactRepository):
         """
         self.repo._download_file(remote_file_path, local_path)
 
-    def delete_artifacts(self, artifact_path=None):
+    def delete_artifacts(self, artifact_path: str | None = None) -> None:
         raise MlflowException("Not implemented yet")

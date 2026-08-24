@@ -4,8 +4,8 @@ import os
 import posixpath
 import time
 from abc import abstractmethod
-from concurrent.futures import as_completed
-from typing import NamedTuple
+from concurrent.futures import ThreadPoolExecutor, as_completed
+from typing import TYPE_CHECKING, NamedTuple
 
 from mlflow.environment_variables import (
     _MLFLOW_MPD_NUM_RETRIES,
@@ -26,6 +26,9 @@ from mlflow.utils.file_utils import (
 )
 from mlflow.utils.request_utils import download_chunk
 from mlflow.utils.uri import is_fuse_or_uc_volumes_uri
+
+if TYPE_CHECKING:
+    from mlflow.protos.databricks_artifacts_pb2 import ArtifactCredentialInfo
 
 _logger = logging.getLogger(__name__)
 _ARTIFACT_UPLOAD_BATCH_SIZE = (
@@ -52,7 +55,7 @@ def _validate_chunk_size_aws(chunk_size: int) -> None:
         )
 
 
-def _compute_num_chunks(local_file: os.PathLike, chunk_size: int) -> int:
+def _compute_num_chunks(local_file: os.PathLike[str], chunk_size: int) -> int:
     """
     Computes the number of chunks to use for a multipart upload of the specified file.
     """
@@ -101,11 +104,11 @@ class CloudArtifactRepository(ArtifactRepository):
         # caused by waiting for a chunk-upload/download task within a file-upload/download task.
         # See https://superfastpython.com/threadpoolexecutor-deadlock/#Deadlock_1_Submit_and_Wait_for_a_Task_Within_a_Task
         # for more details
-        self.chunk_thread_pool = self._create_thread_pool()
+        self.chunk_thread_pool: ThreadPoolExecutor = self._create_thread_pool()
 
     # Write APIs
 
-    def log_artifacts(self, local_dir, artifact_path=None):
+    def log_artifacts(self, local_dir: str, artifact_path: str | None = None) -> None:
         """
         Parallelized implementation of `log_artifacts`.
         """
@@ -175,7 +178,9 @@ class CloudArtifactRepository(ArtifactRepository):
             )
 
     @abstractmethod
-    def _get_write_credential_infos(self, remote_file_paths):
+    def _get_write_credential_infos(
+        self, remote_file_paths: list[str]
+    ) -> list["ArtifactCredentialInfo"]:
         """
         Retrieve write credentials for a batch of remote file paths, including presigned URLs.
 
@@ -298,7 +303,9 @@ class CloudArtifactRepository(ArtifactRepository):
             self._parallelized_download_from_cloud(file_size, remote_file_path, local_path)
 
     @abstractmethod
-    def _get_read_credential_infos(self, remote_file_paths):
+    def _get_read_credential_infos(
+        self, remote_file_paths: list[str]
+    ) -> list["ArtifactCredentialInfo"]:
         """
         Retrieve read credentials for a batch of remote file paths, including presigned URLs.
 

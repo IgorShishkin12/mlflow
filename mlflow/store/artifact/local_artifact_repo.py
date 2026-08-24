@@ -6,6 +6,7 @@ import threading
 from contextlib import suppress
 from typing import Any, AsyncIterable, BinaryIO, Callable
 
+from mlflow.entities.file_info import FileInfo
 from mlflow.exceptions import MlflowException
 from mlflow.protos.databricks_pb2 import RESOURCE_DOES_NOT_EXIST
 from mlflow.store.artifact.artifact_repo import (
@@ -56,10 +57,11 @@ class LocalArtifactRepository(ArtifactRepository, StreamUploadMixin):
         self, artifact_uri: str, tracking_uri: str | None = None, registry_uri: str | None = None
     ) -> None:
         super().__init__(artifact_uri, tracking_uri, registry_uri)
-        self._artifact_dir = local_file_uri_to_path(self.artifact_uri)
+        # local_file_uri_to_path is untyped but always returns str (url2pathname result).
+        self._artifact_dir: str = local_file_uri_to_path(self.artifact_uri)
 
     @property
-    def artifact_dir(self):
+    def artifact_dir(self) -> str:
         return self._artifact_dir
 
     def get_local_path(self, artifact_path: str) -> str:
@@ -131,6 +133,9 @@ class LocalArtifactRepository(ArtifactRepository, StreamUploadMixin):
     ) -> None:
         # Write to a hidden temp file in the destination directory, then atomically
         # replace the target path so readers never see a partially-written artifact.
+        # The descriptor is handed to os.fdopen below, then cleared so the finally block
+        # only closes it if fdopen itself failed.
+        temp_file_descriptor: int | None
         temp_file_descriptor, temp_file_path, destination_file_path = self._create_staging_artifact(
             artifact_file_name, artifact_path
         )
@@ -148,7 +153,7 @@ class LocalArtifactRepository(ArtifactRepository, StreamUploadMixin):
             if not published:
                 self._cleanup_staged_artifact(temp_file_path)
 
-    def log_artifact(self, local_file, artifact_path=None):
+    def log_artifact(self, local_file: str, artifact_path: str | None = None) -> None:
         _, destination_file_path = self._get_destination_artifact_path(local_file, artifact_path)
         try:
             if os.path.samefile(local_file, destination_file_path):
@@ -223,11 +228,11 @@ class LocalArtifactRepository(ArtifactRepository, StreamUploadMixin):
         list_dir = os.path.join(self.artifact_dir, path) if path else self.artifact_dir
         return os.path.isdir(list_dir)
 
-    def log_artifacts(self, local_dir, artifact_path=None):
+    def log_artifacts(self, local_dir: str, artifact_path: str | None = None) -> None:
         artifact_dir = self._get_or_create_artifact_dir(artifact_path)
         shutil_copytree_without_file_permissions(local_dir, artifact_dir)
 
-    def download_artifacts(self, artifact_path, dst_path=None):
+    def download_artifacts(self, artifact_path: str, dst_path: str | None = None) -> str:
         """
         Artifacts tracked by ``LocalArtifactRepository`` already exist on the local filesystem.
         If ``dst_path`` is ``None``, the absolute filesystem path of the specified artifact is
@@ -246,7 +251,7 @@ class LocalArtifactRepository(ArtifactRepository, StreamUploadMixin):
             return super().download_artifacts(artifact_path, dst_path)
         return self.get_local_path(artifact_path)
 
-    def list_artifacts(self, path=None):
+    def list_artifacts(self, path: str | None = None) -> list[FileInfo]:
         if path:
             path = os.path.normpath(path)
         list_dir = os.path.join(self.artifact_dir, path) if path else self.artifact_dir
@@ -275,7 +280,7 @@ class LocalArtifactRepository(ArtifactRepository, StreamUploadMixin):
             )
         shutil.copy2(remote_file_path, local_path)
 
-    def delete_artifacts(self, artifact_path=None):
+    def delete_artifacts(self, artifact_path: str | None = None) -> None:
         artifact_path = local_file_uri_to_path(
             os.path.join(self._artifact_dir, artifact_path) if artifact_path else self._artifact_dir
         )

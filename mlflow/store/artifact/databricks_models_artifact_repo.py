@@ -2,6 +2,7 @@ import json
 import logging
 import os
 import posixpath
+from concurrent.futures import ThreadPoolExecutor
 
 import mlflow.tracking
 from mlflow.entities import FileInfo
@@ -53,6 +54,10 @@ class DatabricksModelsArtifactRepository(ArtifactRepository):
     when the client is pointing to a Databricks-hosted model registry.
     """
 
+    # Annotated here because they are assigned together via tuple unpacking in `__init__`.
+    model_name: str
+    model_version: str
+
     def __init__(
         self, artifact_uri: str, tracking_uri: str | None = None, registry_uri: str | None = None
     ) -> None:
@@ -64,7 +69,7 @@ class DatabricksModelsArtifactRepository(ArtifactRepository):
         super().__init__(artifact_uri, tracking_uri, registry_uri)
         from mlflow.tracking.client import MlflowClient
 
-        self.databricks_profile_uri = (
+        self.databricks_profile_uri: str = (
             get_databricks_profile_uri_from_artifact_uri(artifact_uri)
             or registry_uri
             or mlflow.get_registry_uri()
@@ -76,7 +81,7 @@ class DatabricksModelsArtifactRepository(ArtifactRepository):
         # caused by waiting for a chunk-upload/download task within a file-upload/download task.
         # See https://superfastpython.com/threadpoolexecutor-deadlock/#Deadlock_1_Submit_and_Wait_for_a_Task_Within_a_Task
         # for more details
-        self.chunk_thread_pool = self._create_thread_pool()
+        self.chunk_thread_pool: ThreadPoolExecutor = self._create_thread_pool()
 
     def _call_endpoint(self, json, endpoint):
         db_creds = get_databricks_host_creds(self.databricks_profile_uri)
@@ -207,13 +212,14 @@ class DatabricksModelsArtifactRepository(ArtifactRepository):
                 )
 
         except Exception as err:
-            raise MlflowException(err)
+            # MlflowException stringifies its message, so this is behavior-identical.
+            raise MlflowException(str(err))
 
-    def log_artifact(self, local_file, artifact_path=None):
+    def log_artifact(self, local_file: str, artifact_path: str | None = None) -> None:
         raise MlflowException("This repository does not support logging artifacts.")
 
-    def log_artifacts(self, local_dir, artifact_path=None):
+    def log_artifacts(self, local_dir: str, artifact_path: str | None = None) -> None:
         raise MlflowException("This repository does not support logging artifacts.")
 
-    def delete_artifacts(self, artifact_path=None):
+    def delete_artifacts(self, artifact_path: str | None = None) -> None:
         raise NotImplementedError("This artifact repository does not support deleting artifacts")

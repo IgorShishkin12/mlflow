@@ -2,6 +2,7 @@ import mlflow.utils.databricks_utils
 from mlflow.environment_variables import MLFLOW_ENABLE_UC_VOLUME_FUSE_ARTIFACT_REPO
 from mlflow.exceptions import MlflowException
 from mlflow.protos.databricks_pb2 import INVALID_PARAMETER_VALUE
+from mlflow.store.artifact.artifact_repo import ArtifactRepository
 from mlflow.store.artifact.databricks_sdk_artifact_repo import DatabricksSdkArtifactRepository
 from mlflow.store.artifact.local_artifact_repo import LocalArtifactRepository
 from mlflow.utils.uri import (
@@ -35,7 +36,7 @@ class UCVolumesArtifactRepository(DatabricksSdkArtifactRepository):
 
 def uc_volume_artifact_repo_factory(
     artifact_uri: str, tracking_uri: str | None = None, registry_uri: str | None = None
-):
+) -> ArtifactRepository:
     """
     Returns an ArtifactRepository subclass for storing artifacts on Volumes.
 
