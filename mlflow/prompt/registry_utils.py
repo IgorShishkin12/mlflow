@@ -5,7 +5,7 @@ import re
 import threading
 import time
 from textwrap import dedent
-from typing import Any, NamedTuple
+from typing import Any, Callable, NamedTuple, ParamSpec, TypeVar
 
 import mlflow
 from mlflow.entities.model_registry.model_version import ModelVersion
@@ -23,6 +23,9 @@ from mlflow.prompt.constants import (
 from mlflow.protos.databricks_pb2 import INVALID_PARAMETER_VALUE, RESOURCE_ALREADY_EXISTS
 
 _logger = logging.getLogger(__name__)
+
+P = ParamSpec("P")
+R = TypeVar("R")
 
 
 class PromptCacheKey(NamedTuple):
@@ -122,7 +125,9 @@ def model_version_to_prompt_version(
     else:
         response_format = None
 
-    return PromptVersion(
+    # NB: _ModelRegistryEntity declares `from_proto` abstract, but PromptVersion deliberately
+    # has no proto representation (prompts are built from model-version tags instead).
+    return PromptVersion(  # type: ignore[abstract]
         name=model_version.name,
         version=int(model_version.version),
         template=template,
@@ -159,7 +164,7 @@ def has_prompt_tag(tags: list[RegisteredModelTag] | dict[str, str] | None) -> bo
     if isinstance(tags, dict):
         return IS_PROMPT_TAG_KEY in tags if tags else False
     if not tags:
-        return
+        return False
     return any(tag.key == IS_PROMPT_TAG_KEY for tag in tags)
 
 
@@ -190,11 +195,11 @@ def is_prompt_supported_registry(registry_uri: str | None = None) -> bool:
     return True
 
 
-def require_prompt_registry(func):
+def require_prompt_registry(func: Callable[P, R]) -> Callable[P, R]:
     """Ensure that the current registry supports prompts."""
 
     @functools.wraps(func)
-    def wrapper(*args, **kwargs):
+    def wrapper(*args: P.args, **kwargs: P.kwargs) -> R:
         if args and isinstance(args[0], mlflow.MlflowClient):
             registry_uri = args[0]._registry_uri
         else:
@@ -220,7 +225,7 @@ def require_prompt_registry(func):
     return wrapper
 
 
-def translate_prompt_exception(func):
+def translate_prompt_exception(func: Callable[P, R]) -> Callable[P, R]:
     """
     Translate MlflowException message related to RegisteredModel / ModelVersion into
     prompt-specific message.
@@ -228,7 +233,7 @@ def translate_prompt_exception(func):
     MODEL_PATTERN = re.compile(r"(registered model|model version)", re.IGNORECASE)
 
     @functools.wraps(func)
-    def wrapper(*args, **kwargs):
+    def wrapper(*args: P.args, **kwargs: P.kwargs) -> R:
         try:
             return func(*args, **kwargs)
         except MlflowException as e:

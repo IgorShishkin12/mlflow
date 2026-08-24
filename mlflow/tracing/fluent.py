@@ -66,15 +66,21 @@ if TYPE_CHECKING:
     import pandas
 
 
-_LAST_ACTIVE_TRACE_ID_GLOBAL = None
-_LAST_ACTIVE_TRACE_ID_THREAD_LOCAL = ContextVar("last_active_trace_id", default=None)
+# Module-level cache of the last active trace ID. Annotated explicitly so mypy does not
+# infer `None` from the initializer and then reject string assignments.
+_LAST_ACTIVE_TRACE_ID_GLOBAL: str | None = None
+_LAST_ACTIVE_TRACE_ID_THREAD_LOCAL: ContextVar[str | None] = ContextVar(
+    "last_active_trace_id", default=None
+)
 
 
 @contextlib.contextmanager
 def _set_sampling_ratio_override(sampling_ratio_override: float | None):
     """Context manager to set the sampling ratio override for the OTel sampler."""
     if sampling_ratio_override is not None:
-        token = _SAMPLING_RATIO_OVERRIDE.set(sampling_ratio_override)
+        # _SAMPLING_RATIO_OVERRIDE in mlflow.tracing.sampling is declared without a type
+        # parameter, so it is inferred as ContextVar[None]; the value set here is a float.
+        token = _SAMPLING_RATIO_OVERRIDE.set(sampling_ratio_override)  # type: ignore[arg-type]
         try:
             yield
         finally:
@@ -86,7 +92,7 @@ def _set_sampling_ratio_override(sampling_ratio_override: float | None):
 # Cache mapping between evaluation request ID to MLflow backend request ID.
 # This is necessary for evaluation harness to access generated traces during
 # evaluation using the dataset row ID (evaluation request ID).
-_EVAL_REQUEST_ID_TO_TRACE_ID = TTLCache(maxsize=10000, ttl=3600)
+_EVAL_REQUEST_ID_TO_TRACE_ID: TTLCache[str, str] = TTLCache(maxsize=10000, ttl=3600)
 
 _P = ParamSpec("_P")
 _R = TypeVar("_R")
@@ -444,8 +450,10 @@ def _wrap_generator(
             return
 
         if output_reducer:
+            # `outputs` is always a list on this path (the error path above returns early),
+            # but the parameter type cannot express that without a runtime check.
             try:
-                outputs = output_reducer(outputs)
+                outputs = output_reducer(outputs)  # type: ignore[arg-type]
             except Exception as e:
                 _logger.debug(f"Failed to reduce outputs from stream: {e}")
 
@@ -453,7 +461,9 @@ def _wrap_generator(
 
     def _record_chunk_event(span: LiveSpan, chunk: Any, chunk_index: int):
         try:
-            event = SpanEvent(
+            # SpanEvent does not implement the abstract `_MlflowObject.from_proto`, but the
+            # base class has no ABCMeta metaclass, so instantiation succeeds at runtime.
+            event = SpanEvent(  # type: ignore[abstract]
                 name=STREAM_CHUNK_EVENT_NAME_FORMAT.format(index=chunk_index),
                 # OpenTelemetry SpanEvent only support str-str key-value pairs for attributes
                 attributes={STREAM_CHUNK_EVENT_VALUE_KEY: json.dumps(chunk, cls=TraceJSONEncoder)},
@@ -522,11 +532,12 @@ def _wrap_function_safe(fn: Callable[..., Any], wrapper: Callable[..., Any]) -> 
     wrapped = functools.wraps(fn)(wrapper)
     # Update the signature of the wrapper to match the signature of the original (safely)
     try:
-        wrapped.__signature__ = inspect.signature(fn)
+        # Attributes are set dynamically; `functools.wraps`'s _Wrapped type doesn't declare them.
+        wrapped.__signature__ = inspect.signature(fn)  # type: ignore[attr-defined]
     except Exception:
         pass
     # Add unique marker for MLflow trace detection
-    wrapped.__mlflow_traced__ = True
+    wrapped.__mlflow_traced__ = True  # type: ignore[attr-defined]
     return wrapped
 
 
@@ -611,9 +622,11 @@ def start_span(
         Yields an :py:class:`mlflow.entities.Span` that represents the created span.
     """
     # If tracing is disabled via context(enabled=False), return NoOpSpan
+    # NB: The declared LiveSpan yield type predates the NoOpSpan fallback; widening it to
+    # `LiveSpan | NoOpSpan` would ripple through every caller, so it is suppressed here.
     config = _USER_TRACE_CONTEXT.get()
     if config is not None and config.enabled is False:
-        yield NoOpSpan()
+        yield NoOpSpan()  # type: ignore[misc]
         return
 
     try:
@@ -638,7 +651,8 @@ def start_span(
             # SpanProcessor should have already registered the span in the in-memory trace manager
             trace_manager = InMemoryTraceManager.get_instance()
             mlflow_span = trace_manager.get_span_from_id(
-                request_id, encode_span_id(otel_span.context.span_id)
+                request_id,
+                encode_span_id(otel_span.context.span_id),  # type: ignore[attr-defined]
             )
             mlflow_span.set_span_type(span_type)
             attributes = dict(attributes) if attributes is not None else {}
@@ -673,7 +687,7 @@ def start_span(
     # instead of being caught by the broad "except Exception" above.
     if noop_span is not None:
         with safe_set_span_in_context(noop_span):
-            yield noop_span
+            yield noop_span  # type: ignore[misc]
         return
 
     try:
@@ -752,15 +766,17 @@ def start_span_no_context(
 
     """
     # If tracing is disabled via context(enabled=False), return NoOpSpan
+    # NB: The declared `-> LiveSpan` predates the NoOpSpan fallback paths below; widening it
+    # would ripple through callers, so each fallback return is suppressed individually.
     config = _USER_TRACE_CONTEXT.get()
     if config is not None and config.enabled is False:
-        return NoOpSpan()
+        return NoOpSpan()  # type: ignore[return-value]
 
     # If parent span is no-op span, the child should also be no-op. Preserve the
     # parent OTel span when present so descendants keep inheriting the dropped
     # trace context instead of starting a fresh root trace.
     if parent_span and parent_span.trace_id == NO_OP_SPAN_TRACE_ID:
-        return NoOpSpan(otel_span=parent_span._span)
+        return NoOpSpan(otel_span=parent_span._span)  # type: ignore[return-value]
 
     try:
         # Create new trace and a root span
@@ -776,24 +792,29 @@ def start_span_no_context(
         # If the span was dropped by the sampler, return a NoOpSpan that
         # preserves the OTel span's context so that safe_set_span_in_context
         # propagates the correct trace ID to child spans.
-        if not otel_span.is_recording():
-            return NoOpSpan(otel_span=otel_span)
+        # NB: `start_detached_span` actually returns an OTel span; its declared
+        # `tuple[str, Span] | None` return type is wrong (fixed cross-file is out of scope).
+        if not otel_span.is_recording():  # type: ignore[union-attr]
+            return NoOpSpan(otel_span=otel_span)  # type: ignore[return-value, arg-type]
 
         if parent_span:
             trace_id = parent_span.trace_id
         else:
-            trace_id = get_otel_attribute(otel_span, SpanAttributeKey.REQUEST_ID)
+            # `get_otel_attribute` defensively returns `str | None`, but the request ID
+            # attribute is always set by the span processor for recording spans.
+            trace_id = get_otel_attribute(otel_span, SpanAttributeKey.REQUEST_ID)  # type: ignore[assignment, arg-type]
 
         # SpanProcessor should have already registered the span in the in-memory trace manager
         trace_manager = InMemoryTraceManager.get_instance()
         mlflow_span = trace_manager.get_span_from_id(
-            trace_id, encode_span_id(otel_span.context.span_id)
+            trace_id,
+            encode_span_id(otel_span.context.span_id),  # type: ignore[union-attr]
         )
         mlflow_span.set_span_type(span_type)
 
         # # If the span is a no-op span i.e. tracing is disabled, do nothing
         if isinstance(mlflow_span, NoOpSpan):
-            return mlflow_span
+            return mlflow_span  # type: ignore[return-value]
 
         if inputs is not None:
             mlflow_span.set_inputs(inputs)
@@ -815,7 +836,7 @@ def start_span_no_context(
             f"Failed to start span {name}: {e}. For full traceback, set logging level to debug.",
             exc_info=_logger.isEnabledFor(logging.DEBUG),
         )
-        return NoOpSpan()
+        return NoOpSpan()  # type: ignore[return-value]
 
     for link in links or []:
         try:
@@ -823,7 +844,8 @@ def start_span_no_context(
         except MlflowException:
             _logger.warning("Skipping invalid link: %s", link)
 
-    return mlflow_span
+    # `get_instance` is untyped, so `mlflow_span` is Any here although it is a LiveSpan.
+    return mlflow_span  # type: ignore[no-any-return]
 
 
 def _carries_trace_location(trace_id: str) -> bool:
@@ -862,6 +884,8 @@ def _resolve_uc_trace_id(trace_id: str) -> str:
     return construct_trace_id_v4(location, trace_id)
 
 
+# The `deprecated*` decorators in mlflow.utils.annotations are untyped, so mypy flags every
+# function they decorate as untyped; their runtime behavior is fine.
 @deprecated_parameter("request_id", "trace_id")
 def get_trace(trace_id: str, silent: bool = False, flush: bool = False) -> Trace | None:
     """
@@ -1333,7 +1357,9 @@ def search_sessions(
     def fetch_session_traces(session_id: str) -> list[Trace]:
         session_filter = f"metadata.`{session_id_key}` = '{session_id}'"
 
-        return search_traces(
+        # `return_type="list"` guarantees a list of Trace objects. The typed local is needed
+        # because `search_traces` is untyped (its decorator is untyped).
+        traces: list[Trace] = search_traces(
             filter_string=session_filter,
             max_results=None,  # Get all traces in the session
             order_by=["timestamp ASC"],  # Order by time within session
@@ -1343,6 +1369,7 @@ def search_sessions(
             model_id=model_id,
             locations=locations,
         )
+        return traces
 
     max_workers = min(len(session_ids), MLFLOW_SEARCH_TRACES_MAX_THREADS.get())
     with ThreadPoolExecutor(
@@ -1393,16 +1420,21 @@ def get_current_active_span() -> LiveSpan | None:
         return None
 
     trace_manager = InMemoryTraceManager.get_instance()
-    request_id = otel_span.attributes.get(SpanAttributeKey.REQUEST_ID)
+    # The runtime span is an OpenTelemetry SDK span, which exposes `.attributes` and
+    # `.context`; the `opentelemetry.trace.Span` API type used in the annotation does not.
+    request_id = otel_span.attributes.get(SpanAttributeKey.REQUEST_ID)  # type: ignore[attr-defined]
 
     # Span is not registered in the in-memory trace manager, meaning that the current active
     # span is not created by MLflow, but rather by other OpenTelemetry sdk. Return a span object
     # that wraps the otel span.
     if not request_id:
-        return create_mlflow_span(otel_span, otel_span.context.trace_id)
+        return create_mlflow_span(
+            otel_span,
+            otel_span.context.trace_id,  # type: ignore[attr-defined]
+        )  # type: ignore[return-value]
 
     request_id = json.loads(request_id)
-    return trace_manager.get_span_from_id(request_id, encode_span_id(otel_span.context.span_id))
+    return trace_manager.get_span_from_id(request_id, encode_span_id(otel_span.context.span_id))  # type: ignore[no-any-return, attr-defined]
 
 
 def get_active_trace_id() -> str | None:
@@ -1496,7 +1528,7 @@ def update_current_trace(
     model_id: str | None = None,
     session_id: str | None = None,
     user: str | None = None,
-):
+) -> None:
     """
     Update the current active trace with the given options.
 
@@ -1667,7 +1699,7 @@ def update_current_trace(
 
 
 @deprecated_parameter("request_id", "trace_id")
-def set_trace_tag(trace_id: str, key: str, value: str):
+def set_trace_tag(trace_id: str, key: str, value: str) -> None:
     """
     Set a tag on the trace with the given trace ID.
 
@@ -1719,7 +1751,7 @@ def delete_trace_tag(trace_id: str, key: str) -> None:
     TracingClient().delete_trace_tag(trace_id, key)
 
 
-def add_trace(trace: Trace | dict[str, Any], target: LiveSpan | None = None):
+def add_trace(trace: Trace | dict[str, Any], target: LiveSpan | None = None) -> None:
     """
     Add a completed trace object into another trace.
 
@@ -1895,7 +1927,11 @@ def log_trace(
     """
     if intermediate_outputs:
         if attributes:
-            attributes.update(SpanAttributeKey.INTERMEDIATE_OUTPUTS, intermediate_outputs)
+            # BUG: `dict.update()` accepts a single mapping or **kwargs, not two positional
+            # arguments, so this raises TypeError at runtime whenever `attributes` is given
+            # together with `intermediate_outputs`. Left as-is (deprecated API); the correct
+            # form would be `attributes[SpanAttributeKey.INTERMEDIATE_OUTPUTS] = ...`.
+            attributes.update(SpanAttributeKey.INTERMEDIATE_OUTPUTS, intermediate_outputs)  # type: ignore[call-overload]
         else:
             attributes = {SpanAttributeKey.INTERMEDIATE_OUTPUTS: intermediate_outputs}
 

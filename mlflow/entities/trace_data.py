@@ -33,7 +33,7 @@ class TraceData:
 
     # TODO: remove this property in 3.7.0
     @property
-    @deprecated(since="3.6.0", alternative="trace.search_spans(name=...)")  # type: ignore[misc]
+    @deprecated(since="3.6.0", alternative="trace.search_spans(name=...)")
     def intermediate_outputs(self) -> dict[str, Any] | None:
         """
         .. deprecated:: 3.6.0

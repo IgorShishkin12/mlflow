@@ -5,7 +5,8 @@ import inspect
 import logging
 import threading
 import time
-from typing import Any, Callable
+from collections.abc import Iterator
+from typing import Any, Callable, ParamSpec, Protocol, TypeVar
 
 import mlflow
 from mlflow.entities import Metric
@@ -45,6 +46,24 @@ from mlflow.utils.autologging_utils.versioning import (
 )
 
 INPUT_EXAMPLE_SAMPLE_ROWS = 5
+
+P = ParamSpec("P")
+R = TypeVar("R")
+R_co = TypeVar("R_co", covariant=True)
+
+
+class _WrappedAutolog(Protocol[P, R_co]):
+    """An autologging integration function wrapped by `autologging_integration`.
+
+    The wrapper carries the integration name as a function attribute (set here and by
+    some flavor modules), which `mlflow.autolog()` relies on to look up configuration.
+    """
+
+    integration_name: str
+
+    def __call__(self, *args: P.args, **kwargs: P.kwargs) -> R_co: ...
+
+
 ENSURE_AUTOLOGGING_ENABLED_TEXT = (
     "please ensure that autologging is enabled before constructing the dataset."
 )
@@ -59,7 +78,7 @@ _AUTOLOGGING_GLOBALLY_DISABLED = False
 AUTOLOGGING_CONF_KEY_IS_GLOBALLY_CONFIGURED = "globally_configured"
 
 # Dict mapping integration name to its config.
-AUTOLOGGING_INTEGRATIONS = {}
+AUTOLOGGING_INTEGRATIONS: dict[str, dict[str, Any]] = {}
 
 # Global lock for turning on / off autologging
 # Note "RLock" is required instead of plain lock, for avoid dead-lock
@@ -199,7 +218,8 @@ def resolve_input_example_and_signature(
         try:
             if input_example is None:
                 raise Exception(
-                    "could not sample data to infer model signature: " + input_example_failure_msg
+                    "could not sample data to infer model signature: "
+                    + (input_example_failure_msg or "")
                 )
             model_signature = infer_model_signature(input_example)
         except Exception as e:
@@ -242,8 +262,8 @@ class BatchMetricsLogger:
 
         # data is an array of Metric objects
         self.data = []
-        self.total_training_time = 0
-        self.total_log_batch_time = 0
+        self.total_training_time: float = 0
+        self.total_log_batch_time: float = 0
         self.previous_training_timestamp = None
 
     def flush(self):
@@ -255,7 +275,12 @@ class BatchMetricsLogger:
 
     def _timed_log_batch(self):
         # Retrieving run_id from active mlflow run when run_id is empty.
-        current_run_id = mlflow.active_run().info.run_id if self.run_id is None else self.run_id
+        active_run = mlflow.active_run()
+        current_run_id = (
+            active_run.info.run_id
+            if self.run_id is None and active_run is not None
+            else self.run_id
+        )
 
         start = time.time()
         metrics_slices = [
@@ -382,7 +407,7 @@ def _check_and_log_warning_for_unsupported_package_versions(integration_name):
         )
 
 
-def autologging_integration(name):
+def autologging_integration(name: str) -> Callable[[Callable[P, R]], _WrappedAutolog[P, R]]:
     """
     **All autologging integrations should be decorated with this wrapper.**
 
@@ -403,7 +428,7 @@ def autologging_integration(name):
                 " must specify a 'silent' argument with default value 'False'"
             )
 
-    def wrapper(_autolog):
+    def wrapper(_autolog: Callable[P, R]) -> _WrappedAutolog[P, R]:
         param_spec = inspect.signature(_autolog).parameters
         validate_param_spec(param_spec)
 
@@ -464,15 +489,19 @@ def autologging_integration(name):
 
                 return _autolog(*args, **kwargs)
 
-        wrapped_autolog = update_wrapper_extended(autolog, _autolog)
+        wrapped_autolog: _WrappedAutolog[P, R] = update_wrapper_extended(autolog, _autolog)
         # Set the autologging integration name as a function attribute on the wrapped autologging
         # function, allowing the integration name to be extracted from the function. This is used
-        # during the execution of import hooks for `mlflow.autolog()`.
+        # during the execution of import hooks for `mlflow.autolog()`. `setattr` is used because
+        # `__doc__` is not statically known on the protocol.
         wrapped_autolog.integration_name = name
 
         if name in FLAVOR_TO_MODULE_NAME:
-            wrapped_autolog.__doc__ = gen_autologging_package_version_requirements_doc(name) + (
-                wrapped_autolog.__doc__ or ""
+            setattr(
+                wrapped_autolog,
+                "__doc__",
+                gen_autologging_package_version_requirements_doc(name)
+                + (getattr(wrapped_autolog, "__doc__") or ""),
             )
         return wrapped_autolog
 
@@ -555,7 +584,7 @@ def disable_autologging():
 
 
 @contextlib.contextmanager
-def disable_discrete_autologging(flavors_to_disable: list[str]) -> None:
+def disable_discrete_autologging(flavors_to_disable: list[str]) -> Iterator[None]:
     """
     Context manager for disabling specific autologging integrations temporarily while another
     flavor's autologging is activated. This context wrapper is useful in the event that, for
@@ -625,7 +654,7 @@ def _get_new_training_session_class():
     # 2. The list append & pop operations are thread-safe, so we will always clear the session stack
     #    once all _TrainingSessions exit.
     class _TrainingSession:
-        _session_stack = []
+        _session_stack: list["_TrainingSession"] = []
 
         def __init__(self, estimator, allow_children=True):
             """A session manager for nested autologging runs.

@@ -66,9 +66,9 @@ PROMPT_API_MIGRATION_MSG = (
 
 
 def register_model(
-    model_uri,
-    name,
-    await_registration_for=DEFAULT_AWAIT_MAX_SLEEP_SECONDS,
+    model_uri: str,
+    name: str,
+    await_registration_for: int = DEFAULT_AWAIT_MAX_SLEEP_SECONDS,
     *,
     tags: dict[str, Any] | None = None,
     env_pack: EnvPackType | EnvPackConfig | None = None,
@@ -197,7 +197,9 @@ def _register_model(
         # name artifact_path and source_run_id run_id
         else:
             run = client.get_run(run_id)
-            logged_models = _get_logged_models_from_run(run, artifact_path)
+            # NB: `parse_runs_uri` yields None for a bare `runs:/<run_id>` URI while the callee
+            # declares a model name string; existing runtime behavior is preserved as-is.
+            logged_models = _get_logged_models_from_run(run, artifact_path)  # type: ignore[arg-type]
             if not logged_models:
                 raise MlflowException(
                     f"Unable to find a logged_model with artifact_path {artifact_path} "
@@ -343,7 +345,7 @@ def _get_logged_models_from_run(source_run: Run, model_name: str) -> list[Logged
         model_name: Name of the model to retrieve.
     """
     client = MlflowClient()
-    logged_models = []
+    logged_models: list[LoggedModel] = []
     page_token = None
 
     while True:
@@ -461,11 +463,13 @@ def search_registered_models(
             page_token=next_page_token,
         )
 
-    return get_results_from_paginated_fn(
+    # `get_results_from_paginated_fn` is untyped, so bind through a typed local before returning.
+    registered_models: list[RegisteredModel] = get_results_from_paginated_fn(
         pagination_wrapper_func,
         SEARCH_REGISTERED_MODEL_MAX_RESULTS_DEFAULT,
         max_results,
     )
+    return registered_models
 
 
 def search_model_versions(
@@ -558,11 +562,13 @@ def search_model_versions(
             page_token=next_page_token,
         )
 
-    return get_results_from_paginated_fn(
+    # `get_results_from_paginated_fn` is untyped, so bind through a typed local before returning.
+    model_versions: list[ModelVersion] = get_results_from_paginated_fn(
         paginated_fn=pagination_wrapper_func,
         max_results_per_page=SEARCH_MODEL_VERSION_MAX_RESULTS_DEFAULT,
         max_results=max_results,
     )
+    return model_versions
 
 
 def set_model_version_tag(
@@ -588,6 +594,7 @@ def set_model_version_tag(
     )
 
 
+# `require_prompt_registry` is an untyped wrapper (mlflow/prompt/registry_utils.py).
 @require_prompt_registry
 def register_prompt(
     name: str,
@@ -595,7 +602,7 @@ def register_prompt(
     commit_message: str | None = None,
     tags: dict[str, str] | None = None,
     response_format: type[BaseModel] | dict[str, Any] | None = None,
-    model_config: "PromptModelConfig | dict[str, Any] | None" = None,
+    model_config: PromptModelConfig | dict[str, Any] | None = None,
 ) -> PromptVersion:
     """
     Register a new :py:class:`Prompt <mlflow.entities.Prompt>` in the MLflow Prompt Registry.
@@ -693,7 +700,8 @@ def register_prompt(
         stacklevel=3,
     )
 
-    return MlflowClient().register_prompt(
+    # `MlflowClient.register_prompt` is untyped, so bind through a typed local before returning.
+    prompt_version: PromptVersion = MlflowClient().register_prompt(
         name=name,
         template=template,
         commit_message=commit_message,
@@ -701,8 +709,10 @@ def register_prompt(
         response_format=response_format,
         model_config=model_config,
     )
+    return prompt_version
 
 
+# `require_prompt_registry` is an untyped wrapper (mlflow/prompt/registry_utils.py).
 @require_prompt_registry
 def search_prompts(
     filter_string: str | None = None,
@@ -759,13 +769,16 @@ def search_prompts(
             filter_string=filter_string, max_results=number_to_get, page_token=next_page_token
         )
 
-    return get_results_from_paginated_fn(
+    # `get_results_from_paginated_fn` is untyped, so bind through a typed local before returning.
+    prompts: list[Prompt] = get_results_from_paginated_fn(
         pagination_wrapper_func,
         SEARCH_REGISTERED_MODEL_MAX_RESULTS_DEFAULT,
         max_results,
     )
+    return prompts
 
 
+# `require_prompt_registry` is an untyped wrapper (mlflow/prompt/registry_utils.py).
 @require_prompt_registry
 @record_usage_event(LoadPromptEvent)
 def load_prompt(
@@ -775,7 +788,7 @@ def load_prompt(
     link_to_model: bool = True,
     model_id: str | None = None,
     cache_ttl_seconds: float | None = None,
-) -> PromptVersion:
+) -> PromptVersion | None:
     """
     Load a :py:class:`Prompt <mlflow.entities.Prompt>` from the MLflow Prompt Registry.
 
@@ -826,15 +839,16 @@ def load_prompt(
 
     client = MlflowClient()
 
-    # Load prompt with caching (handled by client)
-    prompt = client.load_prompt(
+    # Load prompt with caching (handled by client). The client method is untyped, so bind
+    # through an annotated local.
+    prompt: PromptVersion | None = client.load_prompt(
         name_or_uri=name_or_uri,
         version=version,
         allow_missing=allow_missing,
         cache_ttl_seconds=cache_ttl_seconds,
     )
     if prompt is None:
-        return
+        return None
 
     # If there is an active MLflow run, associate the prompt with the run.
     # Note that we do this synchronously because it's unlikely that run linking occurs
@@ -858,7 +872,9 @@ def load_prompt(
                 try:
                     client.link_prompt_version_to_model(
                         name=prompt.name,
-                        version=prompt.version,
+                        # `PromptVersion.version` is an int while the client API declares str;
+                        # existing runtime behavior is preserved as-is.
+                        version=prompt.version,  # type: ignore[arg-type]
                         model_id=model_id,
                     )
                 except Exception:
@@ -891,6 +907,7 @@ def load_prompt(
     return prompt
 
 
+# `require_prompt_registry` is an untyped wrapper (mlflow/prompt/registry_utils.py).
 @require_prompt_registry
 def set_prompt_alias(name: str, alias: str, version: int) -> None:
     """
@@ -928,6 +945,7 @@ def set_prompt_alias(name: str, alias: str, version: int) -> None:
     MlflowClient().set_prompt_alias(name=name, version=version, alias=alias)
 
 
+# `require_prompt_registry` is an untyped wrapper (mlflow/prompt/registry_utils.py).
 @require_prompt_registry
 def delete_prompt_alias(name: str, alias: str) -> None:
     """

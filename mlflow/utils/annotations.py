@@ -3,7 +3,7 @@ import re
 import types
 import warnings
 from functools import wraps
-from typing import Callable, ParamSpec, TypeVar, overload
+from typing import Any, Callable, ParamSpec, Protocol, TypeVar, overload
 
 
 def _get_min_indent_of_docstring(docstring_str: str) -> str:
@@ -23,11 +23,14 @@ def _get_min_indent_of_docstring(docstring_str: str) -> str:
     if not docstring_str or "\n" not in docstring_str:
         return ""
 
-    return re.match(r"^\s*", docstring_str.rsplit("\n", 1)[-1]).group()
+    # The pattern r"^\s*" always matches (possibly the empty string), so `match` is never None.
+    match = re.match(r"^\s*", docstring_str.rsplit("\n", 1)[-1])
+    return match.group() if match else ""
 
 
 P = ParamSpec("P")
 R = TypeVar("R")
+T = TypeVar("T", bound=type)
 
 
 @overload
@@ -53,7 +56,7 @@ def experimental(
     version: str | None = None,
     *,
     skip: bool = False,
-) -> Callable[[Callable[P, R]], Callable[P, R]]:
+) -> Callable[P, R] | Callable[[Callable[P, R]], Callable[P, R]]:
     """Decorator / decorator creator for marking APIs experimental in the docstring.
 
     Args:
@@ -145,7 +148,29 @@ def is_marked_deprecated(func):
     return getattr(func, _DEPRECATED_MARK_ATTR_NAME, False)
 
 
-def deprecated(alternative: str | None = None, since: str | None = None, impact: str | None = None):
+class _DeprecatedDecorator(Protocol):
+    """Type of the decorator returned by `deprecated`.
+
+    The overloads preserve the decorated object's type: classes stay classes and
+    functions/methods keep their exact signature. Overloading the `__call__` (rather than
+    `deprecated` itself) is required because the decorator factory's own arguments are
+    identical for both target kinds; only the second, decorating call sees the target.
+    """
+
+    @overload
+    def __call__(self, obj: type[T]) -> type[T]: ...
+
+    @overload
+    def __call__(self, obj: Callable[P, R]) -> Callable[P, R]: ...
+
+    def __call__(self, obj: Callable[P, R] | type[T]) -> Callable[P, R] | type[T]: ...
+
+
+def deprecated(
+    alternative: str | None = None,
+    since: str | None = None,
+    impact: str | None = None,
+) -> _DeprecatedDecorator:
     """Annotation decorator for marking APIs as deprecated in docstrings and raising a warning if
     called.
 
@@ -161,7 +186,7 @@ def deprecated(alternative: str | None = None, since: str | None = None, impact:
         Decorated function or class.
     """
 
-    def deprecated_decorator(obj):
+    def deprecated_decorator(obj: Any) -> Any:
         since_str = f" since {since}" if since else ""
         impact_str = impact or "This method will be removed in a future release."
 
@@ -210,7 +235,11 @@ def deprecated(alternative: str | None = None, since: str | None = None, impact:
     return deprecated_decorator
 
 
-def deprecated_parameter(old_param: str, new_param: str, version: str | None = None):
+def deprecated_parameter(
+    old_param: str,
+    new_param: str,
+    version: str | None = None,
+) -> Callable[[Callable[P, R]], Callable[P, R]]:
     """
     Decorator to handle deprecated parameter renaming with automatic warning and forwarding.
 
@@ -237,17 +266,18 @@ def deprecated_parameter(old_param: str, new_param: str, version: str | None = N
         search_traces(trace_id="123")    # No warning
     """
 
-    def decorator(func):
+    def decorator(func: Callable[P, R]) -> Callable[P, R]:
         sig = inspect.signature(func)
         params = dict(sig.parameters)
 
         if new_param not in params:
             raise ValueError(
-                f"New parameter '{new_param}' not found in function '{func.__name__}' signature"
+                f"New parameter '{new_param}' not found in "
+                f"function '{getattr(func, '__name__')}' signature"
             )
 
         @wraps(func)
-        def wrapper(*args, **kwargs):
+        def wrapper(*args: P.args, **kwargs: P.kwargs) -> R:
             if old_param in kwargs:
                 old_value = kwargs.pop(old_param)
 
@@ -270,8 +300,9 @@ def deprecated_parameter(old_param: str, new_param: str, version: str | None = N
             return func(*args, **kwargs)
 
         # Update the wrapper's signature to include the deprecated parameter as keyword-only
-        # but keep it out of documentation
-        wrapper.__signature__ = sig
+        # but keep it out of documentation. `setattr` is used because functions have no
+        # statically-known `__signature__` attribute.
+        setattr(wrapper, "__signature__", sig)
 
         # Update docstring to note the deprecation (if docstring exists)
         if func.__doc__:
@@ -315,7 +346,7 @@ def filter_user_warnings_once(func):
     return wrapper
 
 
-def requires_sql_backend(func):
+def requires_sql_backend(func: Callable[P, R]) -> Callable[P, R]:
     """
     Decorator for marking APIs that require a SQL-based tracking backend.
 
@@ -333,6 +364,6 @@ def requires_sql_backend(func):
     )
     func.__doc__ = notice + func.__doc__ if func.__doc__ else notice
 
-    func._requires_sql_backend = True
+    setattr(func, "_requires_sql_backend", True)
 
     return func
