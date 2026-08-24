@@ -1,11 +1,12 @@
 import functools
 import warnings
+from typing import Any
 
 from mlflow.models.evaluation import evaluate as model_evaluate
 
 
 @functools.wraps(model_evaluate)
-def evaluate(*args, **kwargs):
+def evaluate(*args: Any, **kwargs: Any) -> Any:
     warnings.warn(
         "The `mlflow.evaluate` API has been deprecated as of MLflow 3.0.0. "
         "Please use these new alternatives:\n\n"

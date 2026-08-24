@@ -5,6 +5,7 @@ The ``mlflow.projects`` module provides an API for running MLflow projects local
 import json
 import logging
 import os
+from typing import Any, Literal, cast
 
 import yaml
 
@@ -207,23 +208,23 @@ def _run(
 
 
 def run(
-    uri,
-    entry_point="main",
-    version=None,
-    parameters=None,
-    docker_args=None,
-    experiment_name=None,
-    experiment_id=None,
-    backend="local",
-    backend_config=None,
-    storage_dir=None,
-    synchronous=True,
-    run_id=None,
-    run_name=None,
-    env_manager=None,
-    build_image=False,
-    docker_auth=None,
-):
+    uri: str,
+    entry_point: str = "main",
+    version: str | None = None,
+    parameters: dict[str, Any] | None = None,
+    docker_args: dict[str, Any] | None = None,
+    experiment_name: str | None = None,
+    experiment_id: str | None = None,
+    backend: str = "local",
+    backend_config: str | dict[str, Any] | None = None,
+    storage_dir: str | None = None,
+    synchronous: bool = True,
+    run_id: str | None = None,
+    run_name: str | None = None,
+    env_manager: Literal["local", "virtualenv", "uv", "conda"] | None = None,
+    build_image: bool = False,
+    docker_auth: dict[str, Any] | None = None,
+) -> SubmittedRun:
     """
     Run an MLflow project. The project can be local or stored at a Git URI.
 
@@ -324,13 +325,13 @@ def run(
         R2: 0.19729662005412607
         ... mlflow.projects: === Run (ID '6a5109febe5e4a549461e149590d0a7c') succeeded ===
     """
-    backend_config_dict = backend_config if backend_config is not None else {}
+    backend_config_dict = cast(dict[str, Any], backend_config if backend_config is not None else {})
     if (
         backend_config
         and type(backend_config) != dict
-        and os.path.splitext(backend_config)[-1] == ".json"
+        and os.path.splitext(cast(str, backend_config))[-1] == ".json"
     ):
-        with open(backend_config) as handle:
+        with open(cast(str, backend_config)) as handle:
             try:
                 backend_config_dict = json.load(handle)
             except ValueError:
@@ -352,7 +353,7 @@ def run(
         experiment_name=experiment_name, experiment_id=experiment_id
     )
 
-    submitted_run_obj = _run(
+    submitted_run_obj: SubmittedRun = _run(
         uri=uri,
         experiment_id=experiment_id,
         entry_point=entry_point,
