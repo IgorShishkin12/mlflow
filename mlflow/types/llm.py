@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import time
 import uuid
+from collections.abc import Sequence
 from dataclasses import asdict, dataclass, field, fields
 from typing import Any, Literal
 
@@ -16,11 +17,19 @@ from mlflow.types.schema import AnyType, Array, ColSpec, DataType, Map, Object, 
 #       is not supported, so the code here is a little ugly.
 
 
-JSON_SCHEMA_TYPES = ["string", "number", "integer", "object", "array", "boolean", "null"]
+JSON_SCHEMA_TYPES: list[str] = [
+    "string",
+    "number",
+    "integer",
+    "object",
+    "array",
+    "boolean",
+    "null",
+]
 
 
 class _BaseDataclass:
-    def _validate_field(self, key, val_type, required):
+    def _validate_field(self, key: str, val_type: type[Any], required: bool) -> None:
         value = getattr(self, key, None)
         if required and value is None:
             raise ValueError(f"`{key}` is required")
@@ -29,14 +38,14 @@ class _BaseDataclass:
                 f"`{key}` must be of type {val_type.__name__}, got {type(value).__name__}"
             )
 
-    def _validate_literal(self, key, allowed_values, required):
+    def _validate_literal(self, key: str, allowed_values: Sequence[str], required: bool) -> None:
         value = getattr(self, key, None)
         if required and value is None:
             raise ValueError(f"`{key}` is required")
         if value is not None and value not in allowed_values:
             raise ValueError(f"`{key}` must be one of {allowed_values}, got {value}")
 
-    def _validate_list(self, key, val_type, required):
+    def _validate_list(self, key: str, val_type: type[Any], required: bool) -> None:
         values = getattr(self, key, None)
         if required and values is None:
             raise ValueError(f"`{key}` is required")
@@ -47,7 +56,12 @@ class _BaseDataclass:
             elif not isinstance(values, list):
                 raise ValueError(f"`{key}` must be a list, got {type(values).__name__}")
 
-    def _convert_dataclass(self, key: str, cls: "_BaseDataclass", required=True):
+    def _convert_dataclass(
+        self,
+        key: str,
+        cls: type["_BaseDataclass"],
+        required: bool = True,
+    ) -> None:
         value = getattr(self, key)
         if value is None:
             if required:
@@ -68,7 +82,12 @@ class _BaseDataclass:
         except TypeError as e:
             raise ValueError(f"Error when coercing {value} to {cls.__name__}: {e}")
 
-    def _convert_dataclass_list(self, key: str, cls: "_BaseDataclass", required=True):
+    def _convert_dataclass_list(
+        self,
+        key: str,
+        cls: type["_BaseDataclass"],
+        required: bool = True,
+    ) -> None:
         values = getattr(self, key)
         if values is None:
             if required:
@@ -89,7 +108,12 @@ class _BaseDataclass:
                     f"Items in `{key}` must all have the same type: {cls.__name__} or dict"
                 )
 
-    def _convert_dataclass_map(self, key, cls, required=True):
+    def _convert_dataclass_map(
+        self,
+        key: str,
+        cls: type["_BaseDataclass"],
+        required: bool = True,
+    ) -> None:
         mapping = getattr(self, key)
         if mapping is None:
             if required:
@@ -116,16 +140,24 @@ class _BaseDataclass:
                 )
         setattr(self, key, new_mapping)
 
-    def to_dict(self):
-        return asdict(self, dict_factory=lambda obj: {k: v for (k, v) in obj if v is not None})
+    def to_dict(self) -> dict[str, Any]:
+        # Every concrete subclass is a @dataclass, but this mixin base itself is not, so
+        # `asdict`'s DataclassInstance bound cannot be satisfied statically here.
+        result: dict[str, Any] = asdict(  # type: ignore[call-overload]
+            self,
+            dict_factory=lambda obj: {k: v for (k, v) in obj if v is not None},
+        )
+        return result
 
     @classmethod
-    def from_dict(cls, data):
+    def from_dict(cls, data: dict[str, Any]) -> Any:
         """
         Create an instance of the class from a dict, ignoring any undefined fields.
         This is useful when the dict contains extra fields, causing cls(**data) to fail.
         """
-        field_names = [field.name for field in fields(cls)]
+        # Concrete subclasses are always @dataclass-decorated; the mixin base is not,
+        # so `fields` cannot verify that statically.
+        field_names = [field.name for field in fields(cls)]  # type: ignore[arg-type]
         filtered_data = {k: v for k, v in data.items() if k in field_names}
         return cls(**filtered_data)
 
@@ -143,11 +175,11 @@ class FunctionToolCallArguments(_BaseDataclass):
     name: str
     arguments: str
 
-    def __post_init__(self):
+    def __post_init__(self) -> None:
         self._validate_field("name", str, True)
         self._validate_field("arguments", str, True)
 
-    def to_tool_call(self, id=None):
+    def to_tool_call(self, id: str | None = None) -> ToolCall:
         if id is None:
             id = str(uuid.uuid4())
         return ToolCall(id=id, function=self)
@@ -168,7 +200,7 @@ class ToolCall(_BaseDataclass):
     id: str = field(default_factory=lambda: str(uuid.uuid4()))
     type: str = "function"
 
-    def __post_init__(self):
+    def __post_init__(self) -> None:
         self._validate_field("id", str, True)
         self._convert_dataclass("function", FunctionToolCallArguments, True)
         self._validate_field("type", str, True)
@@ -201,7 +233,7 @@ class ChatMessage(_BaseDataclass):
     tool_calls: list[ToolCall] | None = None
     tool_call_id: str | None = None
 
-    def __post_init__(self):
+    def __post_init__(self) -> None:
         self._validate_field("role", str, True)
 
         # The refusal/content mutual-exclusion invariant applies regardless of whether
@@ -255,7 +287,7 @@ class ChatChoiceDelta(_BaseDataclass):
     name: str | None = None
     tool_calls: list[ToolCall] | None = None
 
-    def __post_init__(self):
+    def __post_init__(self) -> None:
         self._validate_field("role", str, False)
 
         if self.refusal:
@@ -271,7 +303,7 @@ class ChatChoiceDelta(_BaseDataclass):
 class ParamType(_BaseDataclass):
     type: Literal["string", "number", "integer", "object", "array", "boolean", "null"]
 
-    def __post_init__(self):
+    def __post_init__(self) -> None:
         self._validate_literal("type", JSON_SCHEMA_TYPES, True)
 
 
@@ -295,7 +327,7 @@ class ParamProperty(ParamType):
     enum: list[str] | None = None
     items: ParamProperty | None = None
 
-    def __post_init__(self):
+    def __post_init__(self) -> None:
         self._validate_field("description", str, False)
         self._validate_list("enum", str, False)
         # Convert recursively so nested arrays (e.g. list[list[str]]) preserve
@@ -324,7 +356,7 @@ class ToolParamsSchema(_BaseDataclass):
     required: list[str] | None = None
     additionalProperties: bool | None = None
 
-    def __post_init__(self):
+    def __post_init__(self) -> None:
         self._convert_dataclass_map("properties", ParamProperty, True)
         self._validate_literal("type", ["object"], True)
         self._validate_list("required", str, False)
@@ -352,13 +384,13 @@ class FunctionToolDefinition(_BaseDataclass):
     parameters: ToolParamsSchema | None = None
     strict: bool = False
 
-    def __post_init__(self):
+    def __post_init__(self) -> None:
         self._validate_field("name", str, True)
         self._validate_field("description", str, False)
         self._convert_dataclass("parameters", ToolParamsSchema, False)
         self._validate_field("strict", bool, True)
 
-    def to_tool_definition(self):
+    def to_tool_definition(self) -> ToolDefinition:
         """
         Convenience function for wrapping this in a ToolDefinition
         """
@@ -378,7 +410,7 @@ class ToolDefinition(_BaseDataclass):
     function: FunctionToolDefinition
     type: Literal["function"] = "function"
 
-    def __post_init__(self):
+    def __post_init__(self) -> None:
         self._validate_literal("type", ["function"], True)
         self._convert_dataclass("function", FunctionToolDefinition, True)
 
@@ -436,7 +468,7 @@ class ChatParams(_BaseDataclass):
     custom_inputs: dict[str, Any] | None = None
     tools: list[ToolDefinition] | None = None
 
-    def __post_init__(self):
+    def __post_init__(self) -> None:
         self._validate_field("temperature", float, True)
         self._validate_field("max_tokens", int, False)
         self._validate_list("stop", str, False)
@@ -514,7 +546,7 @@ class ChatCompletionRequest(ChatParams):
 
     messages: list[ChatMessage] = field(default_factory=list)
 
-    def __post_init__(self):
+    def __post_init__(self) -> None:
         self._convert_dataclass_list("messages", ChatMessage)
         super().__post_init__()
 
@@ -540,7 +572,7 @@ class TopTokenLogProb(_BaseDataclass):
     logprob: float
     bytes: list[int] | None = None
 
-    def __post_init__(self):
+    def __post_init__(self) -> None:
         self._validate_field("token", str, True)
         self._validate_field("logprob", float, True)
         self._validate_list("bytes", int, False)
@@ -571,7 +603,7 @@ class TokenLogProb(_BaseDataclass):
     top_logprobs: list[TopTokenLogProb]
     bytes: list[int] | None = None
 
-    def __post_init__(self):
+    def __post_init__(self) -> None:
         self._validate_field("token", str, True)
         self._validate_field("logprob", float, True)
         self._convert_dataclass_list("top_logprobs", TopTokenLogProb)
@@ -589,7 +621,7 @@ class ChatChoiceLogProbs(_BaseDataclass):
 
     content: list[TokenLogProb] | None = None
 
-    def __post_init__(self):
+    def __post_init__(self) -> None:
         self._convert_dataclass_list("content", TokenLogProb, False)
 
 
@@ -614,7 +646,7 @@ class ChatChoice(_BaseDataclass):
     finish_reason: str = "stop"
     logprobs: ChatChoiceLogProbs | None = None
 
-    def __post_init__(self):
+    def __post_init__(self) -> None:
         self._validate_field("index", int, True)
         self._validate_field("finish_reason", str, True)
         self._convert_dataclass("message", ChatMessage, True)
@@ -642,7 +674,7 @@ class ChatChunkChoice(_BaseDataclass):
     finish_reason: str | None = None
     logprobs: ChatChoiceLogProbs | None = None
 
-    def __post_init__(self):
+    def __post_init__(self) -> None:
         self._validate_field("index", int, True)
         self._validate_field("finish_reason", str, False)
         self._convert_dataclass("delta", ChatChoiceDelta, True)
@@ -667,7 +699,7 @@ class TokenUsageStats(_BaseDataclass):
     completion_tokens: int | None = None
     total_tokens: int | None = None
 
-    def __post_init__(self):
+    def __post_init__(self) -> None:
         self._validate_field("prompt_tokens", int, False)
         self._validate_field("completion_tokens", int, False)
         self._validate_field("total_tokens", int, False)
@@ -701,7 +733,7 @@ class ChatCompletionResponse(_BaseDataclass):
     created: int = field(default_factory=lambda: int(time.time()))
     custom_outputs: dict[str, Any] | None = None
 
-    def __post_init__(self):
+    def __post_init__(self) -> None:
         self._validate_field("id", str, False)
         self._validate_field("object", str, True)
         self._validate_field("created", int, True)
@@ -739,7 +771,7 @@ class ChatCompletionChunk(_BaseDataclass):
     created: int = field(default_factory=lambda: int(time.time()))
     custom_outputs: dict[str, Any] | None = None
 
-    def __post_init__(self):
+    def __post_init__(self) -> None:
         self._validate_field("id", str, False)
         self._validate_field("object", str, True)
         self._validate_field("created", int, True)
@@ -765,7 +797,7 @@ _token_usage_stats_col_spec = ColSpec(
 _custom_inputs_col_spec = ColSpec(name="custom_inputs", type=Map(AnyType()), required=False)
 _custom_outputs_col_spec = ColSpec(name="custom_outputs", type=Map(AnyType()), required=False)
 
-CHAT_MODEL_INPUT_SCHEMA = Schema(
+CHAT_MODEL_INPUT_SCHEMA: Schema = Schema(
     [
         ColSpec(
             name="messages",
@@ -827,7 +859,7 @@ CHAT_MODEL_INPUT_SCHEMA = Schema(
     ]
 )
 
-CHAT_MODEL_OUTPUT_SCHEMA = Schema(
+CHAT_MODEL_OUTPUT_SCHEMA: Schema = Schema(
     [
         ColSpec(name="id", type=DataType.string),
         ColSpec(name="object", type=DataType.string),
@@ -860,7 +892,7 @@ CHAT_MODEL_OUTPUT_SCHEMA = Schema(
     ]
 )
 
-CHAT_MODEL_INPUT_EXAMPLE = {
+CHAT_MODEL_INPUT_EXAMPLE: dict[str, Any] = {
     "messages": [
         {"role": "user", "content": "Hello!"},
     ],
@@ -871,7 +903,7 @@ CHAT_MODEL_INPUT_EXAMPLE = {
     "stream": False,
 }
 
-COMPLETIONS_MODEL_INPUT_SCHEMA = Schema(
+COMPLETIONS_MODEL_INPUT_SCHEMA: Schema = Schema(
     [
         ColSpec(name="prompt", type=DataType.string),
         ColSpec(name="temperature", type=DataType.double, required=False),
@@ -882,7 +914,7 @@ COMPLETIONS_MODEL_INPUT_SCHEMA = Schema(
     ]
 )
 
-COMPLETIONS_MODEL_OUTPUT_SCHEMA = Schema(
+COMPLETIONS_MODEL_OUTPUT_SCHEMA: Schema = Schema(
     [
         ColSpec(name="id", type=DataType.string),
         ColSpec(name="object", type=DataType.string),
@@ -916,13 +948,13 @@ COMPLETIONS_MODEL_OUTPUT_SCHEMA = Schema(
     ]
 )
 
-EMBEDDING_MODEL_INPUT_SCHEMA = Schema(
+EMBEDDING_MODEL_INPUT_SCHEMA: Schema = Schema(
     [
         ColSpec(name="input", type=DataType.string),
     ]
 )
 
-EMBEDDING_MODEL_OUTPUT_SCHEMA = Schema(
+EMBEDDING_MODEL_OUTPUT_SCHEMA: Schema = Schema(
     [
         ColSpec(name="object", type=DataType.string),
         ColSpec(

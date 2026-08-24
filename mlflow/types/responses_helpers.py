@@ -307,8 +307,11 @@ class Response(Truncation, ToolChoice):
         texts: list[str] = []
         for output in self.output:
             if output.type == "message":
+                # `content` is an extra="allow" field, undeclared on OutputItem.
                 texts.extend(
-                    content.text for content in output.content if content.type == "output_text"
+                    content.text
+                    for content in output.content  # type: ignore[attr-defined]
+                    if content.type == "output_text"
                 )
 
         return "".join(texts)

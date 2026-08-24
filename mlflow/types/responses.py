@@ -135,7 +135,8 @@ with MlflowEventsAndWarningsBehaviorGlobally(
 RESPONSES_AGENT_INPUT_EXAMPLE = {"input": [{"role": "user", "content": "Hello!"}]}
 
 try:
-    from langchain_core.messages import BaseMessage
+    # langchain is an optional dependency
+    from langchain_core.messages import BaseMessage  # type: ignore[import-not-found]
 
     _HAS_LANGCHAIN_BASE_MESSAGE = True
 except ImportError:
@@ -144,9 +145,9 @@ except ImportError:
 
 def responses_agent_output_reducer(
     chunks: list[ResponsesAgentStreamEvent | dict[str, Any]],
-):
+) -> dict[str, Any]:
     """Output reducer for ResponsesAgent streaming."""
-    output_items = []
+    output_items: list[Any] = []
     for chunk in chunks:
         # Handle both dict and pydantic object formats
         if isinstance(chunk, dict):
@@ -156,7 +157,8 @@ def responses_agent_output_reducer(
         else:
             # Pydantic object (ResponsesAgentStreamEvent)
             if hasattr(chunk, "type") and chunk.type == "response.output_item.done":
-                output_items.append(chunk.item)
+                # "item" is an extra="allow" field, intentionally not declared on the model
+                output_items.append(chunk.item)  # type: ignore[attr-defined]
 
     return ResponsesAgentResponse(output=output_items).model_dump(exclude_none=True)
 
@@ -445,7 +447,7 @@ if _HAS_LANGCHAIN_BASE_MESSAGE:
                     )
                     if aggregator is not None:
                         aggregator.append(text_output_item)
-                    yield ResponsesAgentStreamEvent(
+                    yield ResponsesAgentStreamEvent(  # type: ignore[call-arg]  # extra="allow"
                         type="response.output_item.done", item=text_output_item
                     )
                 if tool_calls := message.get("tool_calls"):
@@ -458,7 +460,7 @@ if _HAS_LANGCHAIN_BASE_MESSAGE:
                         )
                         if aggregator is not None:
                             aggregator.append(function_call_item)
-                        yield ResponsesAgentStreamEvent(
+                        yield ResponsesAgentStreamEvent(  # type: ignore[call-arg]  # extra="allow"
                             type="response.output_item.done", item=function_call_item
                         )
 
@@ -469,7 +471,7 @@ if _HAS_LANGCHAIN_BASE_MESSAGE:
                 )
                 if aggregator is not None:
                     aggregator.append(function_call_output_item)
-                yield ResponsesAgentStreamEvent(
+                yield ResponsesAgentStreamEvent(  # type: ignore[call-arg]  # extra="allow"
                     type="response.output_item.done", item=function_call_output_item
                 )
             elif role == "user" or "human":
@@ -487,7 +489,8 @@ def _cc_stream_to_responses_stream(
     llm_content = ""
     reasoning_content = ""
     tool_calls: dict[int, dict[str, Any]] = {}  # index -> tool_call dict
-    msg_id = None
+    # ChatCompletion chunks may omit the id; helpers and stream events tolerate a None id
+    msg_id: str | None = None
     for chunk in chunks:
         if chunk.get("choices") is None or len(chunk["choices"]) == 0:
             continue
@@ -522,14 +525,14 @@ def _cc_stream_to_responses_stream(
                         if item.get("type") == "text" and item.get("text"):
                             llm_content += item["text"]
                             yield ResponsesAgentStreamEvent(
-                                **create_text_delta(item["text"], item_id=msg_id)
+                                **create_text_delta(item["text"], item_id=msg_id)  # type: ignore[arg-type]  # id may be None
                             )
             elif reasoning_content != "":
                 # reasoning content is done streaming
-                reasoning_item = create_reasoning_item(msg_id, reasoning_content)
+                reasoning_item = create_reasoning_item(msg_id, reasoning_content)  # type: ignore[arg-type]  # id may be None
                 if aggregator is not None:
                     aggregator.append(reasoning_item)
-                yield ResponsesAgentStreamEvent(
+                yield ResponsesAgentStreamEvent(  # type: ignore[call-arg]  # extra="allow"
                     type="response.output_item.done",
                     item=reasoning_item,
                 )
@@ -537,15 +540,17 @@ def _cc_stream_to_responses_stream(
 
             if isinstance(content, str):
                 llm_content += content
-                yield ResponsesAgentStreamEvent(**create_text_delta(content, item_id=msg_id))
+                yield ResponsesAgentStreamEvent(
+                    **create_text_delta(content, item_id=msg_id)  # type: ignore[arg-type]  # id may be None
+                )
 
     # yield an `output_item.done` `output_text` event that aggregates the stream
     # this enables tracing and payload logging
     if llm_content:
-        text_output_item = create_text_output_item(llm_content, msg_id)
+        text_output_item = create_text_output_item(llm_content, msg_id)  # type: ignore[arg-type]  # id may be None
         if aggregator is not None:
             aggregator.append(text_output_item)
-        yield ResponsesAgentStreamEvent(
+        yield ResponsesAgentStreamEvent(  # type: ignore[call-arg]  # extra="allow"
             type="response.output_item.done",
             item=text_output_item,
         )
@@ -553,14 +558,14 @@ def _cc_stream_to_responses_stream(
     for idx in sorted(tool_calls.keys()):
         tool_call = tool_calls[idx]
         function_call_output_item = create_function_call_item(
-            msg_id,
+            msg_id,  # type: ignore[arg-type]  # id may be None
             tool_call["id"],
             tool_call["function"]["name"],
             tool_call["function"]["arguments"],
         )
         if aggregator is not None:
             aggregator.append(function_call_output_item)
-        yield ResponsesAgentStreamEvent(
+        yield ResponsesAgentStreamEvent(  # type: ignore[call-arg]  # extra="allow"
             type="response.output_item.done",
             item=function_call_output_item,
         )

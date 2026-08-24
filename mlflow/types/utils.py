@@ -2,7 +2,7 @@ import logging
 import warnings
 from collections import defaultdict
 from copy import deepcopy
-from typing import Any, Dict, List
+from typing import Any, Dict, Final, List, cast
 
 import numpy as np
 import pandas as pd
@@ -12,6 +12,7 @@ from mlflow.exceptions import MlflowException
 from mlflow.protos.databricks_pb2 import INVALID_PARAMETER_VALUE
 from mlflow.types import DataType
 from mlflow.types.schema import (
+    COLSPEC_TYPES,
     HAS_PYSPARK,
     AnyType,
     Array,
@@ -26,7 +27,7 @@ from mlflow.types.schema import (
     TensorSpec,
 )
 
-MULTIPLE_TYPES_ERROR_MSG = (
+MULTIPLE_TYPES_ERROR_MSG: Final[str] = (
     "Expected all values in the list to be of the same type. To specify a model signature "
     "with a list containing elements of multiple types, define the signature manually "
     "using the Array(AnyType()) type from mlflow.models.schema."
@@ -35,7 +36,7 @@ _logger = logging.getLogger(__name__)
 
 
 class TensorsNotSupportedException(MlflowException):
-    def __init__(self, msg):
+    def __init__(self, msg: str) -> None:
         super().__init__(f"Multidimensional arrays (aka tensors) are not supported. {msg}")
 
 
@@ -71,7 +72,7 @@ def _get_tensor_shape(data, variable_dimension: int | None = 0) -> tuple[int, ..
     return tuple(variable_input_data_shape)
 
 
-def clean_tensor_type(dtype: np.dtype):
+def clean_tensor_type(dtype: np.dtype[Any]) -> np.dtype[Any]:
     """
     This method strips away the size information stored in flexible datatypes such as np.str_ and
     np.bytes_. Other numpy dtypes are returned unchanged.
@@ -116,7 +117,7 @@ def _infer_colspec_type(data: Any) -> DataType | Array | Object | AnyType:
 
 
 class InvalidDataForSignatureInferenceError(MlflowException):
-    def __init__(self, message):
+    def __init__(self, message: str) -> None:
         super().__init__(message=message, error_code=INVALID_PARAMETER_VALUE)
 
 
@@ -168,7 +169,7 @@ def _infer_datatype(data: Any) -> DataType | Array | Object | AnyType | None:
     return _infer_scalar_datatype(data)
 
 
-def _infer_array_datatype(data: list[Any] | np.ndarray) -> Array | None:
+def _infer_array_datatype(data: list[Any] | np.ndarray[Any, np.dtype[Any]]) -> Array | None:
     """Infer schema from an array. This tries to infer type if there is at least one
     non-null item in the list, assuming the list has a homogeneous type. However,
     if the list is empty or all items are null, returns None as a sign of undetermined.
@@ -199,7 +200,10 @@ def _infer_array_datatype(data: list[Any] | np.ndarray) -> Array | None:
             result = Array(dtype)
         elif isinstance(result.dtype, (Array, Object, Map, AnyType)):
             try:
-                result = Array(result.dtype._merge(dtype))
+                # `dtype` may be a bare DataType member (which is not a BaseType); funneling
+                # it into `_merge` is intentional so a type clash raises the standard
+                # MlflowException, converted below to the multi-types error.
+                result = Array(result.dtype._merge(dtype))  # type: ignore[arg-type]
             except MlflowException as e:
                 raise MlflowException.invalid_parameter_value(MULTIPLE_TYPES_ERROR_MSG) from e
         elif isinstance(result.dtype, DataType):
@@ -213,7 +217,7 @@ def _infer_array_datatype(data: list[Any] | np.ndarray) -> Array | None:
 
 
 # datetime is not included here
-SCALAR_TO_DATATYPE_MAPPING = {
+SCALAR_TO_DATATYPE_MAPPING: dict[type, DataType] = {
     bool: DataType.boolean,
     np.bool_: DataType.boolean,
     int: DataType.long,
@@ -335,7 +339,12 @@ def _infer_schema(data: Any) -> Schema:
             requiredness[col] = all(item.get(col) is not None for item in data)
 
         schema = Schema([
-            ColSpec(_infer_colspec_type(values).dtype, name=name, required=requiredness[name])
+            ColSpec(
+                # `values` is a list, so inference always yields an Array
+                cast(Array, _infer_colspec_type(values)).dtype,
+                name=name,
+                required=requiredness[name],
+            )
             for name, values in col_data_mapping.items()
         ])
 
@@ -410,7 +419,8 @@ def _infer_schema(data: Any) -> Schema:
         # e.g. ['some sentence', 'some sentence'] -> Schema([ColSpec(type=DataType.string)])
         # The corresponding pandas DataFrame representation should be pd.DataFrame(data)
         # We set required=True as unnamed optional inputs is not allowed
-        schema = Schema([ColSpec(_infer_colspec_type(data).dtype)])
+        # `data` is a list here, so inference always yields an Array
+        schema = Schema([ColSpec(cast(Array, _infer_colspec_type(data)).dtype)])
     else:
         # DataType
         # e.g. "some sentence" -> Schema([ColSpec(type=DataType.string)])
@@ -453,7 +463,7 @@ def _infer_schema(data: Any) -> Schema:
 
 
 def _infer_numpy_dtype(dtype) -> DataType:
-    supported_types = np.dtype
+    supported_types: type | tuple[type, ...] = np.dtype
 
     # noinspection PyBroadException
     try:
@@ -505,7 +515,7 @@ def _infer_required(col) -> bool:
     return not _is_none_or_nan(col)
 
 
-def _infer_pandas_column(col: pd.Series) -> DataType:
+def _infer_pandas_column(col: pd.Series) -> COLSPEC_TYPES:
     if not isinstance(col, pd.Series):
         raise TypeError(f"Expected pandas.Series, got '{type(col)}'.")
     if len(col.values.shape) > 1:
@@ -517,7 +527,8 @@ def _infer_pandas_column(col: pd.Series) -> DataType:
         try:
             # We convert pandas Series into list and infer the schema.
             # The real schema for internal field should be the Array's dtype
-            arr_type = _infer_colspec_type(col.to_list())
+            # A list input always infers to an Array.
+            arr_type = cast(Array, _infer_colspec_type(col.to_list()))
             return arr_type.dtype
         except Exception as e:
             # For backwards compatibility, we fall back to string
@@ -530,7 +541,11 @@ def _infer_pandas_column(col: pd.Series) -> DataType:
         return _infer_numpy_dtype(col.dtype)
 
 
-def _infer_spark_type(x, data=None, col_name=None) -> DataType:
+# NB: The `DecimalType` case falls through the whole branch chain below (it is a NumericType
+# but neither an IntegralType, FloatType nor DoubleType), so this function can implicitly
+# return None at runtime despite the declared return type. Callers pass the result straight
+# into ColSpec, which then fails on None.
+def _infer_spark_type(x, data=None, col_name=None) -> DataType | Array | Object:  # type: ignore[return]
     import pyspark.sql.types
     from pyspark.ml.linalg import VectorUDT
     from pyspark.sql.functions import col, collect_list
@@ -702,8 +717,11 @@ def _infer_type_and_shape(value):
             value_type = _infer_numpy_dtype(np.array(value).dtype)
             return value_type, None
         except (Exception, MlflowException) as e:
+            # `value` is only potentially bytes here; rendering its repr in the message is
+            # the long-standing behavior, so the str-bytes-safe warning is intentionally
+            # left unaddressed.
             raise MlflowException.invalid_parameter_value(
-                f"Failed to infer schema for parameter {value}: {e!r}"
+                f"Failed to infer schema for parameter {value}: {e!r}"  # type: ignore[str-bytes-safe]
             )
     elif isinstance(value, dict):
         # reuse _infer_schema to infer schema for dict, wrapping it in a dictionary is

@@ -3,7 +3,7 @@ import logging
 from datetime import datetime
 from functools import lru_cache
 from types import UnionType
-from typing import Any, NamedTuple, Optional, TypeVar, Union, get_args, get_origin
+from typing import Any, NamedTuple, NoReturn, Optional, TypeVar, Union, cast, get_args, get_origin
 
 import pydantic
 import pydantic.fields
@@ -25,14 +25,14 @@ from mlflow.types.schema import (
 from mlflow.utils.warnings_utils import color_warning
 
 FIELD_TYPE = pydantic.fields.FieldInfo
-NONE_TYPE = type(None)
-UNION_TYPES = (Union, UnionType)
+NONE_TYPE: type[None] = type(None)
+UNION_TYPES: tuple[Any, ...] = (Union, UnionType)
 
 _logger = logging.getLogger(__name__)
 # special type hint that can be used to convert data to
 # the input example type after data validation
 TypeFromExample = TypeVar("TypeFromExample")
-OPTIONAL_INPUT_MSG = (
+OPTIONAL_INPUT_MSG: str = (
     "Input cannot be Optional type. Fix this by removing the "
     "Optional wrapper from the type hint. To use optional fields, "
     "use a Pydantic-based type hint definition. See "
@@ -42,7 +42,7 @@ OPTIONAL_INPUT_MSG = (
 )
 
 # numpy types are not supported
-TYPE_HINTS_TO_DATATYPE_MAPPING = {
+TYPE_HINTS_TO_DATATYPE_MAPPING: dict[type, DataType] = {
     int: DataType.long,
     str: DataType.string,
     bool: DataType.boolean,
@@ -51,7 +51,7 @@ TYPE_HINTS_TO_DATATYPE_MAPPING = {
     datetime: DataType.datetime,
 }
 
-SUPPORTED_TYPE_HINT_MSG = (
+SUPPORTED_TYPE_HINT_MSG: str = (
     "Type hints must be a list[...] where collection element type is one of these types: "
     f"{list(TYPE_HINTS_TO_DATATYPE_MAPPING.keys())}, pydantic BaseModel subclasses, "
     "lists and dictionaries of primitive types, or typing.Any. Check "
@@ -69,7 +69,7 @@ def _try_import_numpy():
 
 
 @lru_cache(maxsize=1)
-def type_hints_no_signature_inference():
+def type_hints_no_signature_inference() -> tuple[type, ...]:
     """
     This function returns a tuple of types that can be used
     as type hints, but no schema can be inferred from them.
@@ -77,7 +77,7 @@ def type_hints_no_signature_inference():
     ..note::
         These types can not be used as nested types in other type hints.
     """
-    type_hints = ()
+    type_hints: tuple[type, ...] = ()
     try:
         import pandas as pd
 
@@ -111,7 +111,7 @@ class ColSpecType(NamedTuple):
 
 
 class UnsupportedTypeHintException(MlflowException):
-    def __init__(self, type_hint):
+    def __init__(self, type_hint: type[Any]) -> None:
         super().__init__(
             f"Unsupported type hint `{_type_hint_repr(type_hint)}`. {SUPPORTED_TYPE_HINT_MSG}",
             error_code=INVALID_PARAMETER_VALUE,
@@ -119,7 +119,7 @@ class UnsupportedTypeHintException(MlflowException):
 
 
 class InvalidTypeHintException(MlflowException):
-    def __init__(self, *, message):
+    def __init__(self, *, message: str) -> None:
         super().__init__(message, error_code=INVALID_PARAMETER_VALUE)
 
 
@@ -128,11 +128,12 @@ def _signature_cannot_be_inferred_from_type_hint(type_hint: type[Any]) -> bool:
 
 
 def _is_type_hint_from_example(type_hint: type[Any]) -> bool:
-    return type_hint == TypeFromExample
+    # TypeFromExample is a sentinel TypeVar that callers may write as their predict type hint
+    return type_hint == TypeFromExample  # type: ignore[comparison-overlap]
 
 
 def _is_example_valid_for_type_from_example(example: Any) -> bool:
-    allowed_types = (list,)
+    allowed_types: tuple[type[Any], ...] = (list,)
     try:
         import pandas as pd
 
@@ -227,7 +228,10 @@ def _infer_colspec_type_from_type_hint(type_hint: type[Any]) -> ColSpecType:
                     )
                 # Optional type
                 elif len(args) == 2:
-                    effective_type = next((arg for arg in args if arg is not NONE_TYPE), None)
+                    # Optional[X]: exactly one of the two union members is not NoneType
+                    effective_type = cast(
+                        "type[Any]", next((arg for arg in args if arg is not NONE_TYPE), None)
+                    )
                     return ColSpecType(
                         dtype=_infer_colspec_type_from_type_hint(effective_type).dtype,
                         required=False,
@@ -249,7 +253,7 @@ def _infer_colspec_type_from_type_hint(type_hint: type[Any]) -> ColSpecType:
     _raise_type_hint_error(type_hint)
 
 
-def _raise_type_hint_error(type_hint: type[Any]) -> None:
+def _raise_type_hint_error(type_hint: type[Any]) -> NoReturn:
     if (
         type_hint
         in (
@@ -266,7 +270,7 @@ def _raise_type_hint_error(type_hint: type[Any]) -> None:
     raise UnsupportedTypeHintException(type_hint=type_hint)
 
 
-def _infer_type_from_pydantic_model(model: pydantic.BaseModel) -> Object:
+def _infer_type_from_pydantic_model(model: type[pydantic.BaseModel]) -> Object:
     """
     Infer the object schema from a pydantic model.
     """
@@ -315,18 +319,18 @@ def _is_pydantic_type_hint(type_hint: type[Any]) -> bool:
 
 
 def model_fields(
-    model: pydantic.BaseModel,
-) -> dict[str, type[FIELD_TYPE]]:
+    model: pydantic.BaseModel | type[pydantic.BaseModel],
+) -> dict[str, pydantic.fields.FieldInfo]:
     return model.model_fields
 
 
-def model_validate(model: pydantic.BaseModel, values: Any) -> None:
+def model_validate(model: pydantic.BaseModel | type[pydantic.BaseModel], values: Any) -> None:
     # use strict mode to avoid any data conversion here
     # e.g. "123" will not be converted to 123 if the type is int
     model.model_validate(values, strict=True)
 
 
-def field_required(field: type[FIELD_TYPE]) -> bool:
+def field_required(field: pydantic.fields.FieldInfo) -> bool:
     return field.is_required()
 
 
@@ -443,7 +447,10 @@ def _validate_data_against_type_hint(data: Any, type_hint: type[Any]) -> Any:
                 if data is None:
                     return data
                 if len(args) == 2:
-                    effective_type = next((arg for arg in args if arg is not NONE_TYPE), None)
+                    # Optional[X]: exactly one of the two union members is not NoneType
+                    effective_type = cast(
+                        "type[Any]", next((arg for arg in args if arg is not NONE_TYPE), None)
+                    )
                     return _validate_data_against_type_hint(data=data, type_hint=effective_type)
             # Union type with all valid types is matched as AnyType
             # no validation needed for AnyType
@@ -552,7 +559,10 @@ def _get_origin_type(type_hint: type[Any]) -> Any:
     if origin_type in UNION_TYPES:
         args = get_args(type_hint)
         if NONE_TYPE in args and len(args) == 2:
-            effective_type = next((arg for arg in args if arg is not NONE_TYPE), None)
+            # Optional[X]: exactly one of the two union members is not NoneType
+            effective_type = cast(
+                "type[Any]", next((arg for arg in args if arg is not NONE_TYPE), None)
+            )
             return _get_origin_type(effective_type)
         else:
             # Union types match Any

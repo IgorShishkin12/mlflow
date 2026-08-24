@@ -84,7 +84,7 @@ class Function(BaseModel):
     name: str | None = None
     arguments: str | None = None
 
-    def to_tool_call(self, id=None) -> ToolCall:
+    def to_tool_call(self, id: str | None = None) -> ToolCall:
         if id is None:
             id = str(uuid4())
         return ToolCall(id=id, type="function", function=self)
@@ -209,7 +209,9 @@ with warnings.catch_warnings():
         model_config = ConfigDict(extra="allow")
 
         name: str
-        schema: dict[str, Any] = Field(...)
+        # `schema` intentionally shadows the deprecated pydantic v1 `BaseModel.schema()` method
+        # to mirror the OpenAI JSON Schema envelope; pydantic handles it as a plain field.
+        schema: dict[str, Any] = Field(...)  # type: ignore[assignment]
         strict: bool = True
 
 

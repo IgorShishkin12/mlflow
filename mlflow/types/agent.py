@@ -1,8 +1,10 @@
 from typing import Any
 
-from pydantic import ConfigDict, model_validator
+from pydantic import BaseModel, ConfigDict, model_validator
 
-from mlflow.types.chat import BaseModel, ChatUsage, ToolCall
+# Import from the defining module; `mlflow.types.chat` re-imports `BaseModel` without declaring
+# it in `__all__`.
+from mlflow.types.chat import ChatUsage, ToolCall
 from mlflow.types.llm import (
     _custom_inputs_col_spec,
     _custom_outputs_col_spec,
@@ -48,7 +50,7 @@ class ChatAgentMessage(BaseModel):
     attachments: dict[str, str] | None = None
 
     @model_validator(mode="after")
-    def check_content_and_tool_calls(self):
+    def check_content_and_tool_calls(self) -> "ChatAgentMessage":
         """
         Ensure at least one of 'content' or 'tool_calls' is set.
         """
@@ -57,7 +59,7 @@ class ChatAgentMessage(BaseModel):
         return self
 
     @model_validator(mode="after")
-    def check_tool_messages(self):
+    def check_tool_messages(self) -> "ChatAgentMessage":
         """
         Ensure that the 'name' and 'tool_call_id' fields are set for tool messages.
         """
@@ -122,7 +124,7 @@ class ChatAgentResponse(BaseModel):
     usage: ChatUsage | None = None
 
     @model_validator(mode="after")
-    def check_message_ids(self):
+    def check_message_ids(self) -> "ChatAgentResponse":
         """
         Ensure that all messages have an ID and it is unique.
         """
@@ -166,7 +168,7 @@ class ChatAgentChunk(BaseModel):
     usage: ChatUsage | None = None
 
     @model_validator(mode="after")
-    def check_message_id(self):
+    def check_message_id(self) -> "ChatAgentChunk":
         """
         Ensure that the message ID is unique.
         """
