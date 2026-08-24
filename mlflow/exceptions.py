@@ -1,5 +1,6 @@
 import json
 import logging
+from pathlib import Path
 from typing import Any
 
 from mlflow.error_classification import ErrorClass, SqlState
@@ -282,7 +283,10 @@ class MlflowTraceDataException(MlflowTracingException):
     """Exception thrown for trace data related error"""
 
     def __init__(
-        self, error_code: int, request_id: str | None = None, artifact_path: str | None = None
+        self,
+        error_code: int,
+        request_id: str | None = None,
+        artifact_path: str | Path | None = None,
     ) -> None:
         if request_id:
             self.ctx = f"request_id={request_id}"
@@ -298,14 +302,18 @@ class MlflowTraceDataException(MlflowTracingException):
 class MlflowTraceDataNotFound(MlflowTraceDataException):
     """Exception thrown when trace data is not found"""
 
-    def __init__(self, request_id: str | None = None, artifact_path: str | None = None) -> None:
+    def __init__(
+        self, request_id: str | None = None, artifact_path: str | Path | None = None
+    ) -> None:
         super().__init__(NOT_FOUND, request_id, artifact_path)
 
 
 class MlflowTraceDataCorrupted(MlflowTraceDataException):
     """Exception thrown when trace data is corrupted"""
 
-    def __init__(self, request_id: str | None = None, artifact_path: str | None = None) -> None:
+    def __init__(
+        self, request_id: str | None = None, artifact_path: str | Path | None = None
+    ) -> None:
         super().__init__(INVALID_STATE, request_id, artifact_path)
 
 
