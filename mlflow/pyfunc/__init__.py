@@ -1430,7 +1430,7 @@ def get_model_dependencies(model_uri, format="pip"):
     return dep_file
 
 
-@deprecated("mlflow.pyfunc.load_model", 1.0)
+@deprecated("mlflow.pyfunc.load_model", "1.0")
 def load_pyfunc(model_uri, suppress_warnings=False):
     """
     Load a model stored in Python function format.

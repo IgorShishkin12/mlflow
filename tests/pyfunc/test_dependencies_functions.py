@@ -1,3 +1,4 @@
+import re
 from pathlib import Path
 from unittest import mock
 
@@ -5,9 +6,10 @@ import pytest
 import sklearn
 from sklearn.linear_model import LinearRegression
 
-import mlflow.utils.requirements_utils
+import mlflow.pyfunc
 from mlflow.exceptions import MlflowException
 from mlflow.pyfunc import get_model_dependencies
+from mlflow.pyfunc.model import PythonModel
 from mlflow.utils import PYTHON_VERSION
 
 
@@ -137,3 +139,20 @@ def test_get_model_dependencies_with_model_version_uri():
 
     deps = get_model_dependencies("models:/linear/1", format="pip")
     assert f"scikit-learn=={sklearn.__version__}" in Path(deps).read_text()
+
+
+def test_load_pyfunc_deprecation_notice(tmp_path):
+    class Model(PythonModel):
+        def predict(self, context, model_input, params=None):
+            return model_input
+
+    model_path = tmp_path / "model"
+    mlflow.pyfunc.save_model(python_model=Model(), path=model_path)
+
+    with pytest.warns(
+        FutureWarning,
+        match=re.escape("``mlflow.pyfunc.load_pyfunc`` is deprecated since 1.0."),
+    ):
+        loaded = mlflow.pyfunc.load_pyfunc(model_path)
+
+    assert loaded.predict("abc") == "abc"
