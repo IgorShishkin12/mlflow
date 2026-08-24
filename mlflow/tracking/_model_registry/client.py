@@ -5,14 +5,16 @@ exposed in the :py:mod:`mlflow.tracking` module.
 """
 
 import logging
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 from pydantic import BaseModel
 
 from mlflow.entities.model_registry import (
+    ModelVersion,
     ModelVersionTag,
     Prompt,
     PromptVersion,
+    RegisteredModel,
     RegisteredModelTag,
 )
 from mlflow.entities.model_registry.prompt import Prompt
@@ -45,6 +47,9 @@ from mlflow.telemetry.track import record_usage_event
 from mlflow.tracking._model_registry import DEFAULT_AWAIT_MAX_SLEEP_SECONDS, utils
 from mlflow.utils.arguments_utils import _get_arg_names
 
+if TYPE_CHECKING:
+    from mlflow.store.model_registry.abstract_store import AbstractStore
+
 _logger = logging.getLogger(__name__)
 
 
@@ -54,7 +59,7 @@ class ModelRegistryClient:
     models and model versions.
     """
 
-    def __init__(self, registry_uri, tracking_uri):
+    def __init__(self, registry_uri: str | None, tracking_uri: str | None) -> None:
         """
         Args:
             registry_uri: Address of local or remote model registry server.
@@ -68,13 +73,20 @@ class ModelRegistryClient:
         self.store
 
     @property
-    def store(self):
-        return utils._get_store(self.registry_uri, self.tracking_uri)
+    def store(self) -> "AbstractStore":
+        store: AbstractStore = utils._get_store(self.registry_uri, self.tracking_uri)
+        return store
 
     # Registered Model Methods
 
     @record_usage_event(CreateRegisteredModelEvent)
-    def create_registered_model(self, name, tags=None, description=None, deployment_job_id=None):
+    def create_registered_model(
+        self,
+        name: str,
+        tags: dict[str, Any] | None = None,
+        description: str | None = None,
+        deployment_job_id: str | None = None,
+    ) -> RegisteredModel:
         """Create a new registered model in backend store.
 
         Args:
@@ -92,10 +104,17 @@ class ModelRegistryClient:
         # TODO: Do we want to validate the name is legit here - non-empty without "/" and ":" ?
         #       Those are constraints applicable to any backend, given the model URI format.
         tags = tags or {}
-        tags = [RegisteredModelTag(key, str(value)) for key, value in tags.items()]
-        return self.store.create_registered_model(name, tags, description, deployment_job_id)
+        tags = [RegisteredModelTag(key, str(value)) for key, value in tags.items()]  # type: ignore[assignment]
+        return self.store.create_registered_model(
+            name,
+            tags,  # type: ignore[arg-type]
+            description,
+            deployment_job_id,
+        )
 
-    def update_registered_model(self, name, description, deployment_job_id=None):
+    def update_registered_model(
+        self, name: str, description: str, deployment_job_id: str | None = None
+    ) -> RegisteredModel:
         """Updates description for RegisteredModel entity.
 
         Backend raises exception if a registered model with given name does not exist.
@@ -113,7 +132,7 @@ class ModelRegistryClient:
             name=name, description=description, deployment_job_id=deployment_job_id
         )
 
-    def rename_registered_model(self, name, new_name):
+    def rename_registered_model(self, name: str, new_name: str) -> RegisteredModel:
         """Update registered model name.
 
         Args:
@@ -128,7 +147,7 @@ class ModelRegistryClient:
             raise MlflowException("The name must not be an empty string.")
         return self.store.rename_registered_model(name=name, new_name=new_name)
 
-    def delete_registered_model(self, name):
+    def delete_registered_model(self, name: str) -> None:
         """Delete registered model.
         Backend raises exception if a registered model with given name does not exist.
 
@@ -139,11 +158,11 @@ class ModelRegistryClient:
 
     def search_registered_models(
         self,
-        filter_string=None,
-        max_results=SEARCH_REGISTERED_MODEL_MAX_RESULTS_DEFAULT,
-        order_by=None,
-        page_token=None,
-    ):
+        filter_string: str | None = None,
+        max_results: int = SEARCH_REGISTERED_MODEL_MAX_RESULTS_DEFAULT,
+        order_by: list[str] | None = None,
+        page_token: str | None = None,
+    ) -> PagedList[RegisteredModel]:
         """Search for registered models in backend that satisfy the filter criteria.
 
         Args:
@@ -170,7 +189,7 @@ class ModelRegistryClient:
 
         return self.store.search_registered_models(filter_string, max_results, order_by, page_token)
 
-    def get_registered_model(self, name):
+    def get_registered_model(self, name: str) -> RegisteredModel:
         """
         Args:
             name: Name of the registered model to get.
@@ -180,7 +199,7 @@ class ModelRegistryClient:
         """
         return self.store.get_registered_model(name)
 
-    def get_latest_versions(self, name, stages=None):
+    def get_latest_versions(self, name: str, stages: list[str] | None = None) -> list[ModelVersion]:
         """Latest version models for each requests stage. If no ``stages`` provided, returns the
         latest version for each stage.
 
@@ -195,7 +214,7 @@ class ModelRegistryClient:
         """
         return self.store.get_latest_versions(name, stages)
 
-    def set_registered_model_tag(self, name, key, value):
+    def set_registered_model_tag(self, name: str, key: str, value: Any) -> None:
         """Set a tag for the registered model.
 
         Args:
@@ -208,7 +227,7 @@ class ModelRegistryClient:
         """
         self.store.set_registered_model_tag(name, RegisteredModelTag(key, str(value)))
 
-    def delete_registered_model_tag(self, name, key):
+    def delete_registered_model_tag(self, name: str, key: str) -> None:
         """Delete a tag associated with the registered model.
 
         Args:
@@ -225,16 +244,16 @@ class ModelRegistryClient:
     @record_usage_event(CreateModelVersionEvent)
     def create_model_version(
         self,
-        name,
-        source,
-        run_id=None,
-        tags=None,
-        run_link=None,
-        description=None,
-        await_creation_for=DEFAULT_AWAIT_MAX_SLEEP_SECONDS,
-        local_model_path=None,
+        name: str,
+        source: str,
+        run_id: str | None = None,
+        tags: dict[str, Any] | None = None,
+        run_link: str | None = None,
+        description: str | None = None,
+        await_creation_for: int | None = DEFAULT_AWAIT_MAX_SLEEP_SECONDS,
+        local_model_path: str | None = None,
         model_id: str | None = None,
-    ):
+    ) -> ModelVersion:
         """Create a new model version from given source.
 
         Args:
@@ -262,14 +281,14 @@ class ModelRegistryClient:
 
         """
         tags = tags or {}
-        tags = [ModelVersionTag(key, str(value)) for key, value in tags.items()]
+        tags = [ModelVersionTag(key, str(value)) for key, value in tags.items()]  # type: ignore[assignment]
         arg_names = _get_arg_names(self.store.create_model_version)
         if "local_model_path" in arg_names:
-            mv = self.store.create_model_version(
+            mv: ModelVersion = self.store.create_model_version(
                 name,
                 source,
                 run_id,
-                tags,
+                tags,  # type: ignore[arg-type]
                 run_link,
                 description,
                 local_model_path=local_model_path,
@@ -280,13 +299,19 @@ class ModelRegistryClient:
             # local_model_path since old model registry store implementations may not
             # support the local_model_path argument.
             mv = self.store.create_model_version(
-                name, source, run_id, tags, run_link, description, model_id=model_id
+                name,
+                source,
+                run_id,
+                tags,  # type: ignore[arg-type]
+                run_link,
+                description,
+                model_id=model_id,
             )
         if await_creation_for and await_creation_for > 0:
             self.store._await_model_version_creation(mv, await_creation_for)
         return mv
 
-    def copy_model_version(self, src_mv, dst_name):
+    def copy_model_version(self, src_mv: ModelVersion, dst_name: str) -> ModelVersion:
         """Copy a model version from one registered model to another as a new model version.
 
         Args:
@@ -302,7 +327,7 @@ class ModelRegistryClient:
         """
         return self.store.copy_model_version(src_mv=src_mv, dst_name=dst_name)
 
-    def update_model_version(self, name, version, description):
+    def update_model_version(self, name: str, version: str, description: str) -> ModelVersion:
         """Update metadata associated with a model version in backend.
 
         Args:
@@ -312,7 +337,9 @@ class ModelRegistryClient:
         """
         return self.store.update_model_version(name=name, version=version, description=description)
 
-    def transition_model_version_stage(self, name, version, stage, archive_existing_versions=False):
+    def transition_model_version_stage(
+        self, name: str, version: str, stage: str, archive_existing_versions: bool = False
+    ) -> ModelVersion:
         """Update model version stage.
 
         Args:
@@ -337,7 +364,7 @@ class ModelRegistryClient:
             archive_existing_versions=archive_existing_versions,
         )
 
-    def get_model_version(self, name, version):
+    def get_model_version(self, name: str, version: str) -> ModelVersion:
         """
         Args:
             name: Name of the containing registered model.
@@ -348,7 +375,7 @@ class ModelRegistryClient:
         """
         return self.store.get_model_version(name, version)
 
-    def delete_model_version(self, name, version):
+    def delete_model_version(self, name: str, version: str) -> None:
         """Delete model version in backend.
 
         Args:
@@ -358,7 +385,7 @@ class ModelRegistryClient:
         """
         self.store.delete_model_version(name, version)
 
-    def get_model_version_download_uri(self, name, version):
+    def get_model_version_download_uri(self, name: str, version: str) -> str:
         """Get the download location in Model Registry for this model version.
 
         Args:
@@ -373,11 +400,11 @@ class ModelRegistryClient:
 
     def search_model_versions(
         self,
-        filter_string=None,
-        max_results=SEARCH_MODEL_VERSION_MAX_RESULTS_DEFAULT,
-        order_by=None,
-        page_token=None,
-    ):
+        filter_string: str | None = None,
+        max_results: int = SEARCH_MODEL_VERSION_MAX_RESULTS_DEFAULT,
+        order_by: list[str] | None = None,
+        page_token: str | None = None,
+    ) -> PagedList[ModelVersion]:
         """Search for model versions in backend that satisfy the filter criteria.
 
         .. warning:
@@ -402,14 +429,19 @@ class ModelRegistryClient:
         """
         return self.store.search_model_versions(filter_string, max_results, order_by, page_token)
 
-    def get_model_version_stages(self, name, version):
+    def get_model_version_stages(self, name: str, version: str) -> list[str]:
         """
         Returns:
             A list of valid stages.
         """
-        return self.store.get_model_version_stages(name, version)
+        # NB: Not declared on AbstractStore, but third-party store plugins may still
+        # implement it, so keep delegating.
+        stages: list[str] = self.store.get_model_version_stages(  # type: ignore[attr-defined]
+            name, version
+        )
+        return stages
 
-    def set_model_version_tag(self, name, version, key, value):
+    def set_model_version_tag(self, name: str, version: str, key: str, value: Any) -> None:
         """Set a tag for the model version.
 
         Args:
@@ -423,7 +455,7 @@ class ModelRegistryClient:
         """
         self.store.set_model_version_tag(name, version, ModelVersionTag(key, str(value)))
 
-    def delete_model_version_tag(self, name, version, key):
+    def delete_model_version_tag(self, name: str, version: str, key: str) -> None:
         """Delete a tag associated with the model version.
 
         Args:
@@ -436,7 +468,7 @@ class ModelRegistryClient:
         """
         self.store.delete_model_version_tag(name, version, key)
 
-    def set_registered_model_alias(self, name, alias, version):
+    def set_registered_model_alias(self, name: str, alias: str, version: str) -> None:
         """Set a registered model alias pointing to a model version.
 
         Args:
@@ -449,7 +481,7 @@ class ModelRegistryClient:
         """
         self.store.set_registered_model_alias(name, alias, version)
 
-    def delete_registered_model_alias(self, name, alias):
+    def delete_registered_model_alias(self, name: str, alias: str) -> None:
         """Delete an alias associated with a registered model.
 
         Args:
@@ -461,7 +493,7 @@ class ModelRegistryClient:
         """
         self.store.delete_registered_model_alias(name, alias)
 
-    def get_model_version_by_alias(self, name, alias):
+    def get_model_version_by_alias(self, name: str, alias: str) -> ModelVersion:
         """Get the model version instance by name and alias.
 
         Args:
@@ -600,7 +632,7 @@ class ModelRegistryClient:
             model_config=model_config,
         )
 
-    def get_prompt_version(self, name: str, version: str) -> PromptVersion:
+    def get_prompt_version(self, name: str, version: str) -> PromptVersion | None:
         """
         Get a specific version of a prompt.
 
@@ -612,7 +644,7 @@ class ModelRegistryClient:
             version: Version number of the prompt.
 
         Returns:
-            A PromptVersion object.
+            A PromptVersion object, or None if not found.
         """
         return self.store.get_prompt_version(name, version)
 
@@ -665,7 +697,7 @@ class ModelRegistryClient:
         """
         self.store.delete_prompt_tag(name, key)
 
-    def get_prompt_version_by_alias(self, name: str, alias: str) -> PromptVersion:
+    def get_prompt_version_by_alias(self, name: str, alias: str) -> PromptVersion | None:
         """
         Get a prompt version by alias.
 
@@ -677,7 +709,7 @@ class ModelRegistryClient:
             alias: Alias to look up.
 
         Returns:
-            A PromptVersion object.
+            A PromptVersion object, or None if not found.
         """
         return self.store.get_prompt_version_by_alias(name, alias)
 

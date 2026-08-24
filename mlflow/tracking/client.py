@@ -19,7 +19,19 @@ import urllib
 import uuid
 import warnings
 from dataclasses import replace
-from typing import TYPE_CHECKING, Any, Literal, Mapping, Sequence, Union
+from typing import (
+    TYPE_CHECKING,
+    Any,
+    Callable,
+    Literal,
+    Mapping,
+    ParamSpec,
+    Sequence,
+    TypeGuard,
+    TypeVar,
+    Union,
+    cast,
+)
 
 import yaml
 from pydantic import BaseModel
@@ -112,7 +124,11 @@ from mlflow.store.tracking import (
     SEARCH_MAX_RESULTS_DEFAULT,
     SEARCH_TRACES_DEFAULT_MAX_RESULTS,
 )
-from mlflow.store.tracking.mcp_server_registry.abstract_mixin import NOT_SET, MCPIcon
+from mlflow.store.tracking.mcp_server_registry.abstract_mixin import NOT_SET as _NOT_SET_SENTINEL
+from mlflow.store.tracking.mcp_server_registry.abstract_mixin import (
+    MCPIcon,
+    MCPServerRegistryMixin,
+)
 from mlflow.tracing.client import TracingClient
 from mlflow.tracing.constant import TRACE_REQUEST_ID_PREFIX, TraceMetadataKey
 from mlflow.tracing.display import get_display_handler
@@ -162,6 +178,11 @@ if TYPE_CHECKING:
 
 _logger = logging.getLogger(__name__)
 
+# The MCP store mixin exports `NOT_SET` as a bare ``object()`` sentinel. Rebinding it with an
+# ``Any`` annotation lets sentinel-compatible parameter defaults (e.g.
+# ``str | None = NOT_SET``) type-check while remaining the exact same object at runtime.
+NOT_SET: Any = _NOT_SET_SENTINEL
+
 _STAGES_DEPRECATION_WARNING = (
     "Model registry stages will be removed in a future major release. To learn more about the "
     "deprecation of model registry stages, see our migration guide here: https://mlflow.org/docs/"
@@ -184,16 +205,22 @@ def _validate_model_id_specified(model_id: str) -> None:
         )
 
 
-def _disable_in_databricks(use_uc_message=False):
+_P = ParamSpec("_P")
+_R = TypeVar("_R")
+
+
+def _disable_in_databricks(
+    use_uc_message: bool = False,
+) -> Callable[[Callable[_P, _R]], Callable[_P, _R]]:
     """Decorator to disable dataset operations when tracking URI is Databricks.
 
     Args:
         use_uc_message: If True, suggests Unity Catalog instead of fluent API.
     """
 
-    def decorator(func):
+    def decorator(func: Callable[_P, _R]) -> Callable[_P, _R]:
         @functools.wraps(func)
-        def wrapper(self, *args, **kwargs):
+        def wrapper(self, *args: _P.args, **kwargs: _P.kwargs) -> _R:
             if not is_databricks_uri(str(self.tracking_uri)):
                 return func(self, *args, **kwargs)
 
@@ -209,7 +236,9 @@ def _disable_in_databricks(use_uc_message=False):
             )
             raise MlflowException(message, error_code=INVALID_PARAMETER_VALUE)
 
-        return wrapper
+        # functools.wraps() types the wrapper as taking an extra leading argument, but it
+        # forwards to ``func`` unchanged, so its callable type is equivalent.
+        return cast("Callable[_P, _R]", wrapper)
 
     return decorator
 
@@ -252,11 +281,16 @@ class MlflowClient:
         final_tracking_uri = utils._resolve_tracking_uri(tracking_uri)
         self._registry_uri = registry_utils._resolve_registry_uri(registry_uri, tracking_uri)
         self._tracking_client = TrackingServiceClient(final_tracking_uri)
-        self._workspace_store_uri = workspace_utils.resolve_workspace_store_uri(
-            workspace_store_uri, tracking_uri=final_tracking_uri
+        # resolve_workspace_store_uri() always yields a concrete URI here: it falls back to the
+        # explicit argument, a configured override, or the (non-null) resolved tracking URI.
+        self._workspace_store_uri = cast(
+            str,
+            workspace_utils.resolve_workspace_store_uri(
+                workspace_store_uri, tracking_uri=final_tracking_uri
+            ),
         )
         self._tracing_client = TracingClient(final_tracking_uri)
-        self._workspace_client = None
+        self._workspace_client: WorkspaceProviderClient | None = None
 
         # `MlflowClient` also references a `ModelRegistryClient` instance that is provided by the
         # `MlflowClient._get_registry_client()` method. This `ModelRegistryClient` is not explicitly
@@ -267,7 +301,7 @@ class MlflowClient:
         # `_get_workspace_client()`.
 
     @property
-    def tracking_uri(self):
+    def tracking_uri(self) -> str:
         return self._tracking_client.tracking_uri
 
     def get_workspace_store_uri(self) -> str:
@@ -643,7 +677,7 @@ class MlflowClient:
         commit_message: str | None = None,
         tags: dict[str, str] | None = None,
         response_format: type[BaseModel] | dict[str, Any] | None = None,
-        model_config: "PromptModelConfig | dict[str, Any] | None" = None,
+        model_config: PromptModelConfig | dict[str, Any] | None = None,
     ) -> PromptVersion:
         """
         Register a new :py:class:`Prompt <mlflow.entities.Prompt>` in the MLflow Prompt Registry.
@@ -731,7 +765,7 @@ class MlflowClient:
         Returns:
             A :py:class:`Prompt <mlflow.entities.Prompt>` object that was created.
         """
-        registry_client = self._get_registry_client()
+        registry_client: ModelRegistryClient = self._get_registry_client()
 
         validate_prompt_name(name)
 
@@ -757,7 +791,9 @@ class MlflowClient:
                 model_config=model_config,
             )
 
-            return registry_client.get_prompt_version(name, str(prompt_version.version))
+            return registry_client.get_prompt_version(  # type: ignore[return-value]
+                name, str(prompt_version.version)
+            )
 
         # OSS approach using RegisteredModel with special tags
         is_new_prompt = False
@@ -850,20 +886,22 @@ class MlflowClient:
             try:
                 with _prompt_experiment_link_lock:
                     prompt_info = self.get_prompt(prompt_version.name)
+                    if prompt_info is None:
+                        return
                     existing_ids = prompt_info.tags.get(PROMPT_EXPERIMENT_IDS_TAG_KEY, "")
                     existing_ids = existing_ids.rstrip(",").lstrip(",")
                     exp_ids = [eid.strip() for eid in existing_ids.split(",") if eid.strip()]
                     if experiment_id not in exp_ids:
                         exp_ids.append(experiment_id)
-                        exp_ids = ",".join(exp_ids)
+                        joined_ids = ",".join(exp_ids)
                         # Use LIKE to match the experiment ID and experiment ID is auto-incremented
                         # integer. So add comma before and after the list of experiment IDs to
                         # avoid false matches (e.g., "1" matches "10").
-                        exp_ids = f",{exp_ids},"
+                        tagged_ids = f",{joined_ids},"
                         self.set_prompt_tag(
                             name=prompt_version.name,
                             key=PROMPT_EXPERIMENT_IDS_TAG_KEY,
-                            value=exp_ids,
+                            value=tagged_ids,
                         )
             except Exception as e:
                 _logger.warning(
@@ -935,7 +973,7 @@ class MlflowClient:
 
             Inspect the returned object's `.token` attribute to fetch subsequent pages.
         """
-        registry_client = self._get_registry_client()
+        registry_client: ModelRegistryClient = self._get_registry_client()
 
         # Delegate to the store - each store handles its own implementation
         return registry_client.search_prompts(
@@ -1007,7 +1045,8 @@ class MlflowClient:
         # Fetch from server
         try:
             name, version_or_alias = self.parse_prompt_uri(prompt_uri)
-            registry_client = self._get_registry_client()
+            registry_client: ModelRegistryClient = self._get_registry_client()
+            prompt: PromptVersion | None
             if isinstance(version_or_alias, str) and not version_or_alias.isdigit():
                 prompt = registry_client.get_prompt_version_by_alias(name, version_or_alias)
             else:
@@ -1052,7 +1091,9 @@ class MlflowClient:
             prompt: A Prompt object or the prompt URI in the format "prompts:/name/version".
         """
         if isinstance(prompt, str):
-            prompt = self.load_prompt(prompt)
+            # load_prompt() raises when the prompt does not exist (allow_missing defaults to
+            # False), so it always yields a PromptVersion here.
+            prompt = cast(PromptVersion, self.load_prompt(prompt))
         elif not isinstance(prompt, PromptVersion):
             raise MlflowException.invalid_parameter_value(
                 "The `prompt` argument must be a Prompt object or a prompt URI.",
@@ -1071,7 +1112,8 @@ class MlflowClient:
             version: The version of the prompt.
             model_id: The ID of the model to link the prompt version to.
         """
-        return self._get_registry_client().link_prompt_version_to_model(
+        registry_client: ModelRegistryClient = self._get_registry_client()
+        return registry_client.link_prompt_version_to_model(
             name=name,
             version=version,
             model_id=model_id,
@@ -1104,7 +1146,8 @@ class MlflowClient:
                     trace_id="trace_123",
                 )
         """
-        return self._get_registry_client().link_prompt_versions_to_trace(
+        registry_client: ModelRegistryClient = self._get_registry_client()
+        return registry_client.link_prompt_versions_to_trace(
             prompt_versions=prompt_versions,
             trace_id=trace_id,
         )
@@ -1172,6 +1215,8 @@ class MlflowClient:
             prompt_uri: The prompt URI in the format "prompts:/name/version".
         """
         prompt = self.load_prompt(prompt_uri)
+        if prompt is None:
+            raise MlflowException(f"Prompt '{prompt_uri}' does not exist.", RESOURCE_DOES_NOT_EXIST)
         run_id_tags = prompt._tags.get(PROMPT_ASSOCIATED_RUN_IDS_TAG_KEY)
         run_ids = run_id_tags.split(",") if run_id_tags else []
 
@@ -1308,15 +1353,16 @@ class MlflowClient:
             raise MlflowException.invalid_parameter_value(f"Invalid prompt URI format: {uri}")
 
         if parsed_prompt_uri.version is not None:
-            # Direct version reference: prompts:/name/version
-            return parsed_prompt_uri.name, parsed_prompt_uri.version
+            # Direct version reference: prompts:/name/version. The parser guarantees a non-empty
+            # name whenever a version or alias is present.
+            return cast(str, parsed_prompt_uri.name), parsed_prompt_uri.version
 
         if parsed_prompt_uri.alias is not None:
-            # Alias reference: prompts:/name@alias - resolve to version
+            # Alias reference: prompts:/name@alias - resolve to version (name guaranteed non-empty)
             prompt_version = self.get_prompt_version_by_alias(
-                parsed_prompt_uri.name, parsed_prompt_uri.alias
+                cast(str, parsed_prompt_uri.name), parsed_prompt_uri.alias
             )
-            return parsed_prompt_uri.name, str(prompt_version.version)
+            return cast(str, parsed_prompt_uri.name), str(prompt_version.version)
 
         # Handle stage or latest (not supported for prompts)
         raise MlflowException.invalid_parameter_value(
@@ -1382,7 +1428,7 @@ class MlflowClient:
         )
 
     @deprecated_parameter("request_id", "trace_id", version="3.0.0")
-    def get_trace(self, trace_id: str, display=True, flush: bool = False) -> Trace:
+    def get_trace(self, trace_id: str, display: bool = True, flush: bool = False) -> Trace:
         """
         Get the trace matching the specified ``trace_id``.
 
@@ -1590,7 +1636,7 @@ class MlflowClient:
         attributes: dict[str, Any] | None = None,
         status: SpanStatus | str = "OK",
         end_time_ns: int | None = None,
-    ):
+    ) -> None:
         """
         End the trace with the given trace ID. This will end the root span of the trace and
         log the trace to the backend if configured.
@@ -1820,7 +1866,7 @@ class MlflowClient:
         attributes: dict[str, Any] | None = None,
         status: SpanStatus | str = "OK",
         end_time_ns: int | None = None,
-    ):
+    ) -> None:
         """
         End the span with the given trace ID and span ID.
 
@@ -1848,7 +1894,7 @@ class MlflowClient:
             )
 
     @deprecated_parameter("request_id", "trace_id", version="3.0.0")
-    def set_trace_tag(self, trace_id: str, key: str, value: str):
+    def set_trace_tag(self, trace_id: str, key: str, value: str) -> None:
         """
         Set a tag on the trace with the given trace ID.
 
@@ -1909,7 +1955,7 @@ class MlflowClient:
         max_results: int | None = SEARCH_MAX_RESULTS_DEFAULT,
         filter_string: str | None = None,
         order_by: list[str] | None = None,
-        page_token=None,
+        page_token: str | None = None,
     ) -> PagedList[Experiment]:
         """
         Search for experiments that match the specified search query.
@@ -2015,7 +2061,9 @@ class MlflowClient:
         """
         return self._tracking_client.search_experiments(
             view_type=view_type,
-            max_results=max_results,
+            # The store applies its own default when None is passed; only the delegate's
+            # annotation is narrower.
+            max_results=max_results,  # type: ignore[arg-type]
             filter_string=filter_string,
             order_by=order_by,
             page_token=page_token,
@@ -2765,12 +2813,13 @@ class MlflowClient:
         Raises:
             mlflow.MlflowException: If any errors occur.
         """
-        self._tracking_client.log_inputs(run_id, datasets, models)
+        # Any Sequence is accepted at runtime; the delegate's annotation is narrower (list).
+        self._tracking_client.log_inputs(run_id, datasets, models)  # type: ignore[arg-type]
 
-    def log_outputs(self, run_id: str, models: list[LoggedModelOutput]):
+    def log_outputs(self, run_id: str, models: list[LoggedModelOutput]) -> None:
         self._tracking_client.log_outputs(run_id, models)
 
-    def log_artifact(self, run_id, local_path, artifact_path=None) -> None:
+    def log_artifact(self, run_id: str, local_path: str, artifact_path: str | None = None) -> None:
         """Write a local file or directory to the remote ``artifact_uri``.
 
         Args:
@@ -3065,12 +3114,17 @@ class MlflowClient:
 
         """
 
-        def _is_matplotlib_figure(fig):
+        def _is_matplotlib_figure(
+            fig: Union["matplotlib.figure.Figure", "plotly.graph_objects.Figure"],
+        ) -> "TypeGuard[matplotlib.figure.Figure]":
             import matplotlib.figure
 
             return isinstance(fig, matplotlib.figure.Figure)
 
-        def _is_plotly_figure(fig):
+        def _is_plotly_figure(
+            fig: Union["matplotlib.figure.Figure", "plotly.graph_objects.Figure"],
+        ) -> "TypeGuard[Any]":
+            # plotly ships no type stubs in the lint environment, so its Figure class is Any.
             import plotly
 
             return isinstance(fig, plotly.graph_objects.Figure)
@@ -3100,7 +3154,7 @@ class MlflowClient:
     def log_image(
         self,
         run_id: str,
-        image: Union["numpy.ndarray", "PIL.Image.Image", "mlflow.Image"],
+        image: Union["numpy.ndarray[Any, Any]", "PIL.Image.Image", "mlflow.Image"],
         artifact_file: str | None = None,
         key: str | None = None,
         step: int | None = None,
@@ -3263,6 +3317,9 @@ class MlflowClient:
                     "`image` must be one of numpy.ndarray, "
                     "PIL.Image.Image, and mlflow.Image."
                 )
+
+        # Every branch above leaves `image` holding a PIL image.
+        image = cast("PIL.Image.Image", image)
 
         if artifact_file is not None:
             with self._log_artifact_helper(run_id, artifact_file) as tmp_path:
@@ -3485,7 +3542,7 @@ class MlflowClient:
                 data.to_parquet(artifact_path, index=False)
 
         norm_path = posixpath.normpath(artifact_file)
-        artifact_dir = posixpath.dirname(norm_path)
+        artifact_dir: str | None = posixpath.dirname(norm_path)
         artifact_dir = None if artifact_dir == "" else artifact_dir
         artifacts = [f.path for f in self.list_artifacts(run_id, path=artifact_dir)]
         if artifact_file in artifacts:
@@ -3621,7 +3678,7 @@ class MlflowClient:
         def get_artifact_data(run):
             run_id = run.run_id
             norm_path = posixpath.normpath(artifact_file)
-            artifact_dir = posixpath.dirname(norm_path)
+            artifact_dir: str | None = posixpath.dirname(norm_path)
             artifact_dir = None if artifact_dir == "" else artifact_dir
             existing_predictions = pd.DataFrame()
 
@@ -3672,7 +3729,7 @@ class MlflowClient:
         """
         self._tracking_client._record_logged_model(run_id, mlflow_model)
 
-    def list_artifacts(self, run_id: str, path=None) -> list[FileInfo]:
+    def list_artifacts(self, run_id: str, path: str | None = None) -> list[FileInfo]:
         """List the artifacts for a run.
 
         Args:
@@ -4043,11 +4100,11 @@ class MlflowClient:
         if has_prompt_tag(tags):
             raise MlflowException.invalid_parameter_value("Prompts cannot be registered as models.")
 
-        return self._get_registry_client().create_registered_model(
-            name, tags, description, deployment_job_id
-        )
+        registry_client: ModelRegistryClient = self._get_registry_client()
+        return registry_client.create_registered_model(name, tags, description, deployment_job_id)
 
-    def rename_registered_model(self, name: str, new_name: str) -> RegisteredModel:
+    # NB: This method returns None at runtime; the delegate call is not returned.
+    def rename_registered_model(self, name: str, new_name: str) -> None:
         """Update registered model name.
 
         Args:
@@ -4151,11 +4208,16 @@ class MlflowClient:
             description: This sentiment analysis model classifies tweets' tone: happy, sad, angry.
         """
         self._raise_if_prompt(name)
-        return self._get_registry_client().update_registered_model(
-            name=name, description=description, deployment_job_id=deployment_job_id
+        registry_client: ModelRegistryClient = self._get_registry_client()
+        return registry_client.update_registered_model(
+            name=name,
+            # The public API allows None (stores persist it verbatim); only the delegate's
+            # annotation is narrower.
+            description=description,  # type: ignore[arg-type]
+            deployment_job_id=deployment_job_id,
         )
 
-    def delete_registered_model(self, name: str):
+    def delete_registered_model(self, name: str) -> None:
         """
         Delete registered model.
         Backend raises exception if a registered model with given name does not exist.
@@ -4304,7 +4366,8 @@ class MlflowClient:
             name=CordobaWeatherForecastModel; run_id=e14afa2f47a040728060c1699968fd43; version=2
 
         """
-        return self._get_registry_client().search_registered_models(
+        registry_client: ModelRegistryClient = self._get_registry_client()
+        return registry_client.search_registered_models(
             filter_string, max_results, order_by, page_token
         )
 
@@ -4349,7 +4412,7 @@ class MlflowClient:
             tags: {'nlp.framework': 'Spark NLP'}
             description: This sentiment analysis model classifies the tone-happy, sad, angry.
         """
-        rm = self._get_registry_client().get_registered_model(name)
+        rm: RegisteredModel = self._get_registry_client().get_registered_model(name)
 
         # Prompt should not be returned as a registered model
         if has_prompt_tag(rm._tags):
@@ -4429,9 +4492,10 @@ class MlflowClient:
             current_stage: None
         """
         self._raise_if_prompt(name)
-        return self._get_registry_client().get_latest_versions(name, stages)
+        registry_client: ModelRegistryClient = self._get_registry_client()
+        return registry_client.get_latest_versions(name, stages)
 
-    def set_registered_model_tag(self, name, key, value) -> None:
+    def set_registered_model_tag(self, name: str, key: str, value: Any) -> None:
         """Set a tag for the registered model.
 
         Args:
@@ -4603,7 +4667,8 @@ class MlflowClient:
                 run_id = logged_model.source_run_id
             model_id = None
 
-        return self._get_registry_client().create_model_version(
+        registry_client: ModelRegistryClient = self._get_registry_client()
+        return registry_client.create_model_version(
             name=name,
             source=new_source,
             run_id=run_id,
@@ -4707,7 +4772,7 @@ class MlflowClient:
             model_id=model_id,
         )
 
-    def copy_model_version(self, src_model_uri, dst_name) -> ModelVersion:
+    def copy_model_version(self, src_model_uri: str, dst_name: str) -> ModelVersion:
         """
         Copy a model version from one registered model to another as a new model version.
         If the destination model does not exist, it will be created.
@@ -4799,10 +4864,10 @@ class MlflowClient:
                 f"Unsupported source model URI: '{src_model_uri}'. The `copy_model_version` API "
                 "only copies models stored in the 'models:/' scheme."
             )
-        client = self._get_registry_client()
+        client: ModelRegistryClient = self._get_registry_client()
         try:
             src_name, src_version = get_model_name_and_version(client, src_model_uri)
-            src_mv = client.get_model_version(src_name, src_version)
+            src_mv: ModelVersion = client.get_model_version(src_name, src_version)
         except MlflowException as e:
             raise MlflowException(
                 f"Failed to fetch model version from source model URI: '{src_model_uri}'. "
@@ -4888,7 +4953,8 @@ class MlflowClient:
             raise MlflowException("Attempting to update model version with no new field values.")
 
         self._raise_if_prompt(name)
-        return self._get_registry_client().update_model_version(
+        registry_client: ModelRegistryClient = self._get_registry_client()
+        return registry_client.update_model_version(
             name=name, version=version, description=description
         )
 
@@ -4968,7 +5034,8 @@ class MlflowClient:
             Stage: Staging
         """
         self._raise_if_prompt(name)
-        return self._get_registry_client().transition_model_version_stage(
+        registry_client: ModelRegistryClient = self._get_registry_client()
+        return registry_client.transition_model_version_stage(
             name, version, stage, archive_existing_versions
         )
 
@@ -5124,7 +5191,7 @@ class MlflowClient:
             Version: 2
 
         """
-        mv = self._get_registry_client().get_model_version(name, version)
+        mv: ModelVersion = self._get_registry_client().get_model_version(name, version)
         if has_prompt_tag(mv._tags):
             raise _model_not_found(name)
         return mv
@@ -5175,7 +5242,8 @@ class MlflowClient:
             Download URI: runs:/027d7bbe81924c5a82b3e4ce979fcab7/sklearn-model
         """
         self._raise_if_prompt(name)
-        return self._get_registry_client().get_model_version_download_uri(name, version)
+        registry_client: ModelRegistryClient = self._get_registry_client()
+        return registry_client.get_model_version_download_uri(name, version)
 
     def search_model_versions(
         self,
@@ -5257,7 +5325,8 @@ class MlflowClient:
             ------------------------------------------------------------------------------------
             name=CordobaWeatherForecastModel; run_id=e14afa2f47a040728060c1699968fd43; version=2
         """
-        return self._get_registry_client().search_model_versions(
+        registry_client: ModelRegistryClient = self._get_registry_client()
+        return registry_client.search_model_versions(
             filter_string, max_results, order_by, page_token
         )
 
@@ -5771,7 +5840,7 @@ class MlflowClient:
             Aliases: ["test-alias"]
         """
         _validate_model_name(name)
-        mv = self._get_registry_client().get_model_version_by_alias(name, alias)
+        mv: ModelVersion = self._get_registry_client().get_model_version_by_alias(name, alias)
 
         if has_prompt_tag(mv._tags):
             raise _model_not_found(name)
@@ -6089,7 +6158,7 @@ class MlflowClient:
                 tags={"team": "data-science"},
             )
         """
-        registry_client = self._get_registry_client()
+        registry_client: ModelRegistryClient = self._get_registry_client()
         return registry_client.create_prompt(name, description, tags)
 
     @require_prompt_registry
@@ -6101,7 +6170,7 @@ class MlflowClient:
         description: str | None = None,
         tags: dict[str, str] | None = None,
         response_format: type[BaseModel] | dict[str, Any] | None = None,
-        model_config: "PromptModelConfig | dict[str, Any] | None" = None,
+        model_config: PromptModelConfig | dict[str, Any] | None = None,
     ) -> PromptVersion:
         """
         Create a new version of an existing prompt.
@@ -6138,7 +6207,7 @@ class MlflowClient:
                 tags={"author": "alice"},
             )
         """
-        registry_client = self._get_registry_client()
+        registry_client: ModelRegistryClient = self._get_registry_client()
         return registry_client.create_prompt_version(
             name=name,
             template=template,
@@ -6172,7 +6241,7 @@ class MlflowClient:
                 print(f"Prompt: {prompt.name}")
                 print(f"Description: {prompt.description}")
         """
-        registry_client = self._get_registry_client()
+        registry_client: ModelRegistryClient = self._get_registry_client()
         return registry_client.get_prompt(name)
 
     @require_prompt_registry
@@ -6202,7 +6271,9 @@ class MlflowClient:
             prompt_alias = client.get_prompt_version("my_prompt", "production")
         """
         registry_client = self._get_registry_client()
-        return registry_client.get_prompt_version(name, version)
+        # The store accepts numeric versions (coercing internally); only its annotation
+        # is narrower than the `str | int` accepted here.
+        return registry_client.get_prompt_version(name, version)  # type: ignore[no-any-return]
 
     @require_prompt_registry
     @translate_prompt_exception
@@ -6254,7 +6325,7 @@ class MlflowClient:
             client = MlflowClient()
             client.set_prompt_tag("my_prompt", "environment", "production")
         """
-        registry_client = self._get_registry_client()
+        registry_client: ModelRegistryClient = self._get_registry_client()
         return registry_client.set_prompt_tag(name, key, value)
 
     @require_prompt_registry
@@ -6279,7 +6350,7 @@ class MlflowClient:
             client = MlflowClient()
             client.delete_prompt_tag("my_prompt", "environment")
         """
-        registry_client = self._get_registry_client()
+        registry_client: ModelRegistryClient = self._get_registry_client()
         return registry_client.delete_prompt_tag(name, key)
 
     @require_prompt_registry
@@ -6307,14 +6378,14 @@ class MlflowClient:
             client = MlflowClient()
             prompt_version = client.get_prompt_version_by_alias("my_prompt", "production")
         """
-        registry_client = self._get_registry_client()
-        return registry_client.get_prompt_version_by_alias(name, alias)
+        registry_client: ModelRegistryClient = self._get_registry_client()
+        return registry_client.get_prompt_version_by_alias(name, alias)  # type: ignore[return-value]
 
     @require_prompt_registry
     @translate_prompt_exception
     def search_prompt_versions(
         self, name: str, max_results: int | None = None, page_token: str | None = None
-    ):
+    ) -> PagedList[PromptVersion]:
         """
         Search prompt versions for a given prompt name.
 
@@ -6338,7 +6409,7 @@ class MlflowClient:
             for version in versions:
                 print(f"Version {version.version}: {version.template}")
         """
-        registry_client = self._get_registry_client()
+        registry_client: ModelRegistryClient = self._get_registry_client()
         return registry_client.search_prompt_versions(name, max_results, page_token)
 
     @require_prompt_registry
@@ -6666,10 +6737,12 @@ class MlflowClient:
         if status is not None:
             status = WebhookStatus(status) if isinstance(status, str) else status
 
-        return self._get_registry_client().create_webhook(
+        registry_client: ModelRegistryClient = self._get_registry_client()
+        return registry_client.create_webhook(
             name=name,
             url=url,
-            events=events,
+            # Every string event was converted above, so only WebhookEvent items remain.
+            events=cast("list[WebhookEvent]", events),
             description=description,
             secret=secret,
             status=status,
@@ -6685,7 +6758,8 @@ class MlflowClient:
         Returns:
             A :py:class:`mlflow.entities.webhook.Webhook` object.
         """
-        return self._get_registry_client().get_webhook(webhook_id)
+        registry_client: ModelRegistryClient = self._get_registry_client()
+        return registry_client.get_webhook(webhook_id)
 
     def list_webhooks(
         self,
@@ -6702,7 +6776,8 @@ class MlflowClient:
         Returns:
             A :py:class:`mlflow.store.entities.paged_list.PagedList` of Webhook objects.
         """
-        return self._get_registry_client().list_webhooks(max_results, page_token)
+        registry_client: ModelRegistryClient = self._get_registry_client()
+        return registry_client.list_webhooks(max_results, page_token)
 
     def update_webhook(
         self,
@@ -6736,12 +6811,14 @@ class MlflowClient:
         if status is not None:
             status = WebhookStatus(status) if isinstance(status, str) else status
 
-        return self._get_registry_client().update_webhook(
+        registry_client: ModelRegistryClient = self._get_registry_client()
+        return registry_client.update_webhook(
             webhook_id=webhook_id,
             name=name,
             description=description,
             url=url,
-            events=events,
+            # When provided, every string event was converted above.
+            events=cast("list[WebhookEvent] | None", events),
             secret=secret,
             status=status,
         )
@@ -6773,7 +6850,8 @@ class MlflowClient:
         Returns:
             WebhookTestResult indicating success/failure and response details.
         """
-        return self._get_registry_client().test_webhook(webhook_id, event)
+        registry_client: ModelRegistryClient = self._get_registry_client()
+        return registry_client.test_webhook(webhook_id, event)
 
     # ---------------------------------------------------------------------------
     # MCP Server Registry
@@ -6785,14 +6863,16 @@ class MlflowClient:
         description: str | None = None,
         icons: list[MCPIcon] | None = None,
     ) -> MCPServer:
-        return self._tracking_client.store.create_mcp_server(
+        store: MCPServerRegistryMixin = self._tracking_client.store
+        return store.create_mcp_server(
             name=name,
             description=description,
             icons=icons,
         )
 
     def get_mcp_server(self, name: str) -> MCPServer:
-        return self._tracking_client.store.get_mcp_server(name=name)
+        store: MCPServerRegistryMixin = self._tracking_client.store
+        return store.get_mcp_server(name=name)
 
     def search_mcp_servers(
         self,
@@ -6801,7 +6881,8 @@ class MlflowClient:
         order_by: list[str] | None = None,
         page_token: str | None = None,
     ) -> PagedList[MCPServer]:
-        return self._tracking_client.store.search_mcp_servers(
+        store: MCPServerRegistryMixin = self._tracking_client.store
+        return store.search_mcp_servers(
             filter_string=filter_string,
             max_results=max_results,
             order_by=order_by,
@@ -6815,7 +6896,8 @@ class MlflowClient:
         description: str | None = NOT_SET,
         icons: list[MCPIcon] | None = NOT_SET,
     ) -> MCPServer:
-        return self._tracking_client.store.update_mcp_server(
+        store: MCPServerRegistryMixin = self._tracking_client.store
+        return store.update_mcp_server(
             name=name,
             display_name=display_name,
             description=description,
@@ -6836,7 +6918,8 @@ class MlflowClient:
         from mlflow.genai.mcp_tool_discovery import resolve_tools_for_create
 
         resolved_tools = resolve_tools_for_create(server_json=server_json, tools=tools)
-        return self._tracking_client.store.create_mcp_server_version(
+        store: MCPServerRegistryMixin = self._tracking_client.store
+        return store.create_mcp_server_version(
             server_json=server_json,
             source=source,
             status=status,
@@ -6845,13 +6928,16 @@ class MlflowClient:
         )
 
     def get_mcp_server_version(self, name: str, version: str) -> MCPServerVersion:
-        return self._tracking_client.store.get_mcp_server_version(name=name, version=version)
+        store: MCPServerRegistryMixin = self._tracking_client.store
+        return store.get_mcp_server_version(name=name, version=version)
 
     def get_mcp_server_version_by_alias(self, name: str, alias: str) -> MCPServerVersion:
-        return self._tracking_client.store.get_mcp_server_version_by_alias(name=name, alias=alias)
+        store: MCPServerRegistryMixin = self._tracking_client.store
+        return store.get_mcp_server_version_by_alias(name=name, alias=alias)
 
     def get_latest_mcp_server_version(self, name: str) -> MCPServerVersion:
-        return self._tracking_client.store.get_latest_mcp_server_version(name=name)
+        store: MCPServerRegistryMixin = self._tracking_client.store
+        return store.get_latest_mcp_server_version(name=name)
 
     def search_mcp_server_versions(
         self,
@@ -6861,7 +6947,8 @@ class MlflowClient:
         order_by: list[str] | None = None,
         page_token: str | None = None,
     ) -> PagedList[MCPServerVersion]:
-        return self._tracking_client.store.search_mcp_server_versions(
+        store: MCPServerRegistryMixin = self._tracking_client.store
+        return store.search_mcp_server_versions(
             name=name,
             filter_string=filter_string,
             max_results=max_results,
@@ -6877,7 +6964,8 @@ class MlflowClient:
         tools: list[MCPTool] | None = NOT_SET,
         connect_options: dict[str, ConnectOptionSettings] | None = NOT_SET,
     ) -> MCPServerVersion:
-        return self._tracking_client.store.update_mcp_server_version(
+        store: MCPServerRegistryMixin = self._tracking_client.store
+        return store.update_mcp_server_version(
             name=name,
             version=version,
             status=status,
@@ -6914,7 +7002,8 @@ class MlflowClient:
         server_version: str | None = None,
         server_alias: str | None = None,
     ) -> MCPAccessEndpoint:
-        return self._tracking_client.store.create_mcp_access_endpoint(
+        store: MCPServerRegistryMixin = self._tracking_client.store
+        return store.create_mcp_access_endpoint(
             server_name=server_name,
             url=url,
             transport_type=transport_type,
@@ -6923,9 +7012,8 @@ class MlflowClient:
         )
 
     def get_mcp_access_endpoint(self, server_name: str, endpoint_id: str) -> MCPAccessEndpoint:
-        return self._tracking_client.store.get_mcp_access_endpoint(
-            server_name=server_name, endpoint_id=endpoint_id
-        )
+        store: MCPServerRegistryMixin = self._tracking_client.store
+        return store.get_mcp_access_endpoint(server_name=server_name, endpoint_id=endpoint_id)
 
     def search_mcp_access_endpoints(
         self,
@@ -6937,7 +7025,8 @@ class MlflowClient:
         order_by: list[str] | None = None,
         page_token: str | None = None,
     ) -> PagedList[MCPAccessEndpoint]:
-        return self._tracking_client.store.search_mcp_access_endpoints(
+        store: MCPServerRegistryMixin = self._tracking_client.store
+        return store.search_mcp_access_endpoints(
             server_name=server_name,
             server_version=server_version,
             server_alias=server_alias,
@@ -6956,7 +7045,8 @@ class MlflowClient:
         server_version: str | None = NOT_SET,
         server_alias: str | None = NOT_SET,
     ) -> MCPAccessEndpoint:
-        return self._tracking_client.store.update_mcp_access_endpoint(
+        store: MCPServerRegistryMixin = self._tracking_client.store
+        return store.update_mcp_access_endpoint(
             server_name=server_name,
             endpoint_id=endpoint_id,
             url=url,
