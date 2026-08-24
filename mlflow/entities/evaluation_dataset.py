@@ -19,7 +19,7 @@ from mlflow.tracking.context import registry as context_registry
 from mlflow.utils.mlflow_tags import MLFLOW_USER
 
 if TYPE_CHECKING:
-    import pandas as pd  # type: ignore[import-untyped]
+    import pandas as pd
 
     from mlflow.entities.trace import Trace
 

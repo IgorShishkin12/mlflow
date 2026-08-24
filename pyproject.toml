@@ -602,3 +602,22 @@ disallow_untyped_calls = false
 # the same reason); suppress all diagnostics raised within them.
 module = "mlflow.protos.*"
 ignore_errors = true
+
+[[tool.mypy.overrides]]
+# Third-party libraries used by adopted modules that ship no stubs in the lint
+# environment. Their values flow through as `Any`, which is the honest type for
+# these SDK objects; per-file `# type: ignore[import-untyped]` comments would
+# just duplicate this list.
+module = [
+  "boto3.*",
+  "botocore.*",
+  "google.cloud.*",
+  "google.resumable_media.*",
+  "pandas.*",
+  "paramiko.*",
+  "plotly.*",
+  "pyarrow.*",
+  "pysftp.*",
+  "scipy.*",
+]
+ignore_missing_imports = true
