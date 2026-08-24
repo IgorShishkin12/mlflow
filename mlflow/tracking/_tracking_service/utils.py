@@ -5,7 +5,7 @@ from collections import OrderedDict
 from contextlib import contextmanager
 from functools import lru_cache, partial
 from pathlib import Path
-from typing import Generator
+from typing import TYPE_CHECKING, Generator
 from urllib.parse import unquote
 
 from mlflow.environment_variables import MLFLOW_ENABLE_WORKSPACES, MLFLOW_TRACKING_URI
@@ -24,8 +24,11 @@ from mlflow.utils.uri import (
     get_uri_scheme,
 )
 
+if TYPE_CHECKING:
+    from mlflow.store.artifact.artifact_repo import ArtifactRepository
+
 _logger = logging.getLogger(__name__)
-_tracking_uri = None
+_tracking_uri: str | None = None
 _SERVER_ARTIFACT_ROOT_ENV_VAR = "_MLFLOW_SERVER_ARTIFACT_ROOT"
 
 
@@ -63,14 +66,14 @@ def _get_default_tracking_uri() -> str:
     )
 
 
-def is_tracking_uri_set():
+def is_tracking_uri_set() -> bool:
     """Returns True if the tracking URI has been set, False otherwise."""
     if _tracking_uri or MLFLOW_TRACKING_URI.get():
         return True
     return False
 
 
-def set_tracking_uri(uri: str | Path) -> None:
+def set_tracking_uri(uri: str | Path | None) -> None:
     """
     Set the tracking server URI. This does not affect the
     currently active run (if one exists), but takes effect for successive runs.
@@ -165,17 +168,21 @@ def get_tracking_uri() -> str:
     """
     if _tracking_uri is not None:
         return _tracking_uri
-    elif uri := MLFLOW_TRACKING_URI.get():
+
+    env_uri: str | None = MLFLOW_TRACKING_URI.get()
+    if uri := env_uri:
         return uri
-    else:
-        default_uri = _get_default_tracking_uri()
-        if default_uri == DEFAULT_LOCAL_FILE_AND_ARTIFACT_PATH:
-            return path_to_local_file_uri(os.path.abspath(default_uri))
-        if default_uri.startswith("sqlite:///"):
-            sqlite_path = unquote(default_uri[len("sqlite:///") :])
-            db_path = os.path.abspath(sqlite_path)
-            return path_to_local_sqlite_uri(db_path)
-        return default_uri
+
+    default_uri = _get_default_tracking_uri()
+    if default_uri == DEFAULT_LOCAL_FILE_AND_ARTIFACT_PATH:
+        file_uri: str = path_to_local_file_uri(os.path.abspath(default_uri))
+        return file_uri
+    if default_uri.startswith("sqlite:///"):
+        sqlite_path = unquote(default_uri[len("sqlite:///") :])
+        db_path = os.path.abspath(sqlite_path)
+        sqlite_uri: str = path_to_local_sqlite_uri(db_path)
+        return sqlite_uri
+    return default_uri
 
 
 def _get_file_store(store_uri, **_):
@@ -298,7 +305,7 @@ def _resolve_custom_scheme(scheme: str, resolved_store_uri: str) -> str:
     return "custom_scheme"
 
 
-_artifact_repos_cache = OrderedDict()
+_artifact_repos_cache: "OrderedDict[str, ArtifactRepository]" = OrderedDict()
 
 
 def _get_artifact_repo(run_id):

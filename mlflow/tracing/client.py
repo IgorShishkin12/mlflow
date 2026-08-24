@@ -53,11 +53,13 @@ from mlflow.protos.databricks_pb2 import (
     NOT_FOUND,
     RESOURCE_DOES_NOT_EXIST,
 )
+from mlflow.store.artifact.artifact_repo import ArtifactRepository
 from mlflow.store.artifact.artifact_repository_registry import get_artifact_repository
 from mlflow.store.entities.paged_list import PagedList
 from mlflow.store.tracking import SEARCH_TRACES_DEFAULT_MAX_RESULTS
 from mlflow.telemetry.events import LogAssessmentEvent, StartTraceEvent, TraceAttachmentsEvent
 from mlflow.telemetry.track import record_usage_event
+from mlflow.tracing.analysis import TraceFilterCorrelationResult
 from mlflow.tracing.attachments import Attachment
 from mlflow.tracing.constant import (
     SpansLocation,
@@ -81,7 +83,7 @@ class TracingClient:
     Client of an MLflow Tracking Server that creates and manages experiments and runs.
     """
 
-    def __init__(self, tracking_uri: str | None = None):
+    def __init__(self, tracking_uri: str | None = None) -> None:
         """
         Args:
             tracking_uri: Address of local or remote tracking server.
@@ -95,6 +97,11 @@ class TracingClient:
 
     @property
     def store(self):
+        # Deliberately untyped: the Databricks-only trace-location store methods
+        # (set_experiment_trace_location, get_trace_location, create_or_get_trace_location,
+        # link_trace_location, unset_experiment_trace_location) are not declared on
+        # AbstractStore, so this cannot be annotated without cross-file changes. Call sites
+        # that return store values suppress [no-any-return] accordingly.
         return _get_store(self.tracking_uri)
 
     @record_usage_event(StartTraceEvent)
@@ -108,7 +115,7 @@ class TracingClient:
         Returns:
             The returned TraceInfoV3 object from the backend.
         """
-        return self.store.start_trace(trace_info=trace_info)
+        return self.store.start_trace(trace_info=trace_info)  # type: ignore[no-any-return]
 
     def log_spans(self, location: str, spans: list[Span]) -> list[Span]:
         """
@@ -122,7 +129,7 @@ class TracingClient:
         Returns:
             List of logged Span objects from the backend.
         """
-        return self.store.log_spans(
+        return self.store.log_spans(  # type: ignore[no-any-return]
             location=location,
             spans=spans,
             tracking_uri=self.tracking_uri if is_databricks_uri(self.tracking_uri) else None,
@@ -159,7 +166,7 @@ class TracingClient:
         max_traces: int | None = None,
         trace_ids: list[str] | None = None,
     ) -> int:
-        return self.store.delete_traces(
+        return self.store.delete_traces(  # type: ignore[no-any-return]
             experiment_id=experiment_id,
             max_timestamp_millis=max_timestamp_millis,
             max_traces=max_traces,
@@ -178,9 +185,9 @@ class TracingClient:
         """
         with InMemoryTraceManager.get_instance().get_trace(trace_id) as trace:
             if trace is not None:
-                return trace.info
+                return trace.info  # type: ignore[no-any-return]
 
-        return self.store.get_trace_info(trace_id)
+        return self.store.get_trace_info(trace_id)  # type: ignore[no-any-return]
 
     def get_trace(self, trace_id: str) -> Trace:
         """
@@ -204,7 +211,7 @@ class TracingClient:
             attempt = 0
             while True:
                 if traces := self.store.batch_get_traces([trace_id], location):
-                    return traces[0]
+                    return traces[0]  # type: ignore[no-any-return]
 
                 remaining = deadline - time.monotonic()
                 if remaining <= 0:
@@ -231,11 +238,11 @@ class TracingClient:
                     SpansLocation.ARCHIVE_REPO,
                 ):
                     try:
-                        return self.store.get_trace(trace_id)
+                        return self.store.get_trace(trace_id)  # type: ignore[no-any-return]
                     except MlflowNotImplementedException:
                         pass
                     if traces := self.store.batch_get_traces([trace_info.trace_id]):
-                        return traces[0]
+                        return traces[0]  # type: ignore[no-any-return]
                     else:
                         raise MlflowException(
                             f"Trace with ID {trace_id} is not found.",
@@ -267,7 +274,7 @@ class TracingClient:
         source_inference_table: str,
         source_databricks_request_id: str,
     ) -> str:
-        return self.store.get_online_trace_details(
+        return self.store.get_online_trace_details(  # type: ignore[no-any-return]
             trace_id=trace_id,
             source_inference_table=source_inference_table,
             source_databricks_request_id=source_databricks_request_id,
@@ -354,7 +361,9 @@ class TracingClient:
 
         if run_id:
             run = self.store.get_run(run_id)
-            if run.info.experiment_id not in locations:
+            # `locations` is not guaranteed to be set when a run_id is given; if it is None
+            # this membership test raises TypeError at runtime (latent bug, kept as-is here).
+            if run.info.experiment_id not in locations:  # type: ignore[operator]
                 raise MlflowException(
                     f"Run {run_id} belongs to experiment {run.info.experiment_id}, which is not "
                     f"in the list of locations provided: {locations}. Please include "
@@ -376,7 +385,7 @@ class TracingClient:
             else:
                 filter_string = additional_filter
 
-        traces = []
+        traces: list[Trace] = []
         next_max_results = max_results
         next_token = page_token
 
@@ -400,7 +409,11 @@ class TracingClient:
 
                 if include_spans:
                     trace_infos_by_location = self._group_trace_infos_by_location(trace_infos)
-                    traces.extend(self._load_traces_by_location(trace_infos_by_location, executor))
+                    # `executor` is always a ThreadPoolExecutor in this branch (guarded by
+                    # `include_spans` above), but mypy cannot narrow the ternary binding.
+                    traces.extend(
+                        self._load_traces_by_location(trace_infos_by_location, executor)  # type: ignore[arg-type]
+                    )
 
                 else:
                     traces.extend(Trace(t, TraceData(spans=[])) for t in trace_infos)
@@ -428,7 +441,7 @@ class TracingClient:
 
         # If location is provided, this is a UC schema/v4 call - delegate directly
         if location is not None:
-            return self.store.batch_get_traces(trace_ids, location)
+            return self.store.batch_get_traces(trace_ids, location)  # type: ignore[no-any-return]
 
         # Get trace infos (metadata only) to determine where spans are stored.
         # Fall back to store.batch_get_traces directly if the store doesn't
@@ -436,7 +449,7 @@ class TracingClient:
         try:
             trace_infos = self.store.batch_get_trace_infos(trace_ids)
         except MlflowNotImplementedException:
-            return self.store.batch_get_traces(trace_ids, location)
+            return self.store.batch_get_traces(trace_ids, location)  # type: ignore[no-any-return]
 
         trace_infos_by_location = self._group_trace_infos_by_location(trace_infos)
 
@@ -466,10 +479,12 @@ class TracingClient:
 
     def _load_traces_by_location(
         self,
-        trace_infos_by_location: dict[str, list[TraceInfo]],
+        # `None` is a valid key: traces in the tracking store are grouped under None
+        # because their location is not used on the fetch path.
+        trace_infos_by_location: dict[str | None, list[TraceInfo]],
         executor: ThreadPoolExecutor,
     ) -> list[Trace]:
-        traces = []
+        traces: list[Trace] = []
         for location, location_trace_infos in trace_infos_by_location.items():
             if location == SpansLocation.ARTIFACT_REPO:
                 traces.extend(
@@ -504,15 +519,20 @@ class TracingClient:
         # For online traces in Databricks, we need to get trace data from a different endpoint
         try:
             if is_databricks and is_online_trace:
-                # For online traces, get data from the online API
-                trace_data = self.get_online_trace_details(
+                # For online traces, get data from the online API. The local is reused for
+                # the parsed payload below, hence the `str | TraceData` annotation.
+                trace_data: str | TraceData = self.get_online_trace_details(
                     trace_id=trace_info.trace_id,
-                    source_inference_table=trace_info.request_metadata.get("mlflow.sourceTable"),
+                    # The metadata entries are expected to be present for online traces,
+                    # but `.get()` cannot prove it; missing values are a latent bug.
+                    source_inference_table=trace_info.request_metadata.get("mlflow.sourceTable"),  # type: ignore[arg-type]
                     source_databricks_request_id=trace_info.request_metadata.get(
                         "mlflow.databricksRequestId"
-                    ),
+                    ),  # type: ignore[arg-type]
                 )
-                trace_data = TraceData.from_dict(json.loads(trace_data))
+                # mypy does not narrow the union above across the multi-line call, so
+                # `trace_data` is still `str | TraceData` here although it holds a JSON string.
+                trace_data = TraceData.from_dict(json.loads(trace_data))  # type: ignore[arg-type]
             else:
                 # For offline traces, download data from artifact storage
                 trace_data = self._download_trace_data(trace_info)
@@ -530,14 +550,14 @@ class TracingClient:
 
     def _group_trace_infos_by_location(
         self, trace_infos: list[TraceInfo]
-    ) -> dict[str, list[TraceInfo]]:
+    ) -> dict[str | None, list[TraceInfo]]:
         """
         Group the trace infos based on where the trace data is stored.
 
         Returns:
             A dictionary mapping location to a list of trace infos.
         """
-        trace_infos_by_location = defaultdict(list)
+        trace_infos_by_location: dict[str | None, list[TraceInfo]] = defaultdict(list)
         for trace_info in trace_infos:
             if uc_schema := trace_info.trace_location.uc_schema:
                 location = f"{uc_schema.catalog_name}.{uc_schema.schema_name}"
@@ -570,7 +590,7 @@ class TracingClient:
         filter_string1: str,
         filter_string2: str,
         base_filter: str | None = None,
-    ):
+    ) -> TraceFilterCorrelationResult:
         """
         Calculate the correlation (NPMI) between two trace filter conditions.
 
@@ -608,14 +628,14 @@ class TracingClient:
             print(f"NPMI: {result.npmi:.3f}")
             # Output: NPMI: 0.456
         """
-        return self.store.calculate_trace_filter_correlation(
+        return self.store.calculate_trace_filter_correlation(  # type: ignore[no-any-return]
             experiment_ids=experiment_ids,
             filter_string1=filter_string1,
             filter_string2=filter_string2,
             base_filter=base_filter,
         )
 
-    def set_trace_tags(self, trace_id: str, tags: dict[str, str]):
+    def set_trace_tags(self, trace_id: str, tags: dict[str, str]) -> None:
         """
         Set tags on the trace with the given trace_id.
 
@@ -627,7 +647,7 @@ class TracingClient:
         for k, v in tags.items():
             self.set_trace_tag(trace_id, k, v)
 
-    def set_trace_tag(self, trace_id: str, key: str, value: str):
+    def set_trace_tag(self, trace_id: str, key: str, value: str) -> None:
         """
         Set a tag on the trace with the given trace ID.
 
@@ -656,7 +676,7 @@ class TracingClient:
 
         self.store.set_trace_tag(trace_id, key, str(value))
 
-    def delete_trace_tag(self, trace_id: str, key: str):
+    def delete_trace_tag(self, trace_id: str, key: str) -> None:
         """
         Delete a tag on the trace with the given trace ID.
 
@@ -697,7 +717,7 @@ class TracingClient:
             The Assessment object.
         """
 
-        return self.store.get_assessment(trace_id, assessment_id)
+        return self.store.get_assessment(trace_id, assessment_id)  # type: ignore[no-any-return]
 
     @record_usage_event(LogAssessmentEvent)
     def log_assessment(self, trace_id: str, assessment: Assessment) -> Assessment:
@@ -732,17 +752,17 @@ class TracingClient:
                     )
                     return assessment
                 if trace.is_remote_trace:
-                    return self.store.create_assessment(assessment)
+                    return self.store.create_assessment(assessment)  # type: ignore[no-any-return]
                 trace.info.assessments.append(assessment)
             return assessment
-        return self.store.create_assessment(assessment)
+        return self.store.create_assessment(assessment)  # type: ignore[no-any-return]
 
     def update_assessment(
         self,
         trace_id: str,
         assessment_id: str,
         assessment: Assessment,
-    ):
+    ) -> Assessment:
         """
         Update an existing assessment entity in the backend store.
 
@@ -752,7 +772,7 @@ class TracingClient:
             assessment: The updated assessment.
         """
 
-        return self.store.update_assessment(
+        return self.store.update_assessment(  # type: ignore[no-any-return]
             trace_id=trace_id,
             assessment_id=assessment_id,
             name=assessment.name,
@@ -762,7 +782,7 @@ class TracingClient:
             metadata=assessment.metadata,
         )
 
-    def delete_assessment(self, trace_id: str, assessment_id: str):
+    def delete_assessment(self, trace_id: str, assessment_id: str) -> None:
         """
         Delete an assessment associated with a trace.
 
@@ -773,7 +793,7 @@ class TracingClient:
 
         self.store.delete_assessment(trace_id=trace_id, assessment_id=assessment_id)
 
-    def _get_artifact_repo_for_trace(self, trace_info: TraceInfo):
+    def _get_artifact_repo_for_trace(self, trace_info: TraceInfo) -> ArtifactRepository:
         artifact_uri = get_artifact_uri_for_trace(trace_info)
         artifact_uri = add_databricks_profile_info_to_artifact_uri(artifact_uri, self.tracking_uri)
         return get_artifact_repository(artifact_uri)
@@ -831,7 +851,7 @@ class TracingClient:
         sql_warehouse_id: str | None = None,
     ) -> UCSchemaLocation:
         if is_databricks_uri(self.tracking_uri):
-            return self.store.set_experiment_trace_location(
+            return self.store.set_experiment_trace_location(  # type: ignore[no-any-return]
                 experiment_id=str(experiment_id),
                 location=location,
                 sql_warehouse_id=sql_warehouse_id,
@@ -842,7 +862,7 @@ class TracingClient:
 
     def _get_trace_location(self, telemetry_profile_id: str) -> UnityCatalog:
         if is_databricks_uri(self.tracking_uri) and hasattr(self.store, "get_trace_location"):
-            return self.store.get_trace_location(telemetry_profile_id)
+            return self.store.get_trace_location(telemetry_profile_id)  # type: ignore[no-any-return]
         raise MlflowException("Getting trace location by ID is not supported on this backend.")
 
     def _create_or_get_trace_location(
@@ -851,7 +871,9 @@ class TracingClient:
         if is_databricks_uri(self.tracking_uri) and hasattr(
             self.store, "create_or_get_trace_location"
         ):
-            return self.store.create_or_get_trace_location(location, sql_warehouse_id)
+            return self.store.create_or_get_trace_location(  # type: ignore[no-any-return]
+                location, sql_warehouse_id
+            )
         raise MlflowException("Creating trace location is not supported on this backend.")
 
     def _link_trace_location(self, experiment_id: str, location: UnityCatalog) -> None:
@@ -899,7 +921,7 @@ class TracingClient:
         Returns:
             The created Issue entity.
         """
-        return self.store.create_issue(
+        return self.store.create_issue(  # type: ignore[no-any-return]
             experiment_id=experiment_id,
             name=name,
             description=description,
@@ -921,7 +943,7 @@ class TracingClient:
         Returns:
             The Issue entity.
         """
-        return self.store.get_issue(issue_id)
+        return self.store.get_issue(issue_id)  # type: ignore[no-any-return]
 
     # ----- Label schemas (tracking-store CRUD) -----
 
@@ -952,7 +974,7 @@ class TracingClient:
             The created :py:class:`LabelSchema` with backend-generated
             ``schema_id`` and audit fields populated.
         """
-        return self.store.create_label_schema(
+        return self.store.create_label_schema(  # type: ignore[no-any-return]
             experiment_id=experiment_id,
             name=name,
             type=type,
@@ -962,10 +984,10 @@ class TracingClient:
         )
 
     def _get_label_schema(self, schema_id: str) -> "LabelSchema":
-        return self.store.get_label_schema(schema_id)
+        return self.store.get_label_schema(schema_id)  # type: ignore[no-any-return]
 
     def _get_label_schema_by_name(self, experiment_id: str, name: str) -> "LabelSchema":
-        return self.store.get_label_schema_by_name(experiment_id, name)
+        return self.store.get_label_schema_by_name(experiment_id, name)  # type: ignore[no-any-return]
 
     def _list_label_schemas(
         self,
@@ -973,7 +995,7 @@ class TracingClient:
         max_results: int = 100,
         page_token: str | None = None,
     ) -> "PagedList[LabelSchema]":
-        return self.store.list_label_schemas(
+        return self.store.list_label_schemas(  # type: ignore[no-any-return]
             experiment_id, max_results=max_results, page_token=page_token
         )
 
@@ -995,7 +1017,7 @@ class TracingClient:
         Returns:
             The updated :py:class:`LabelSchema`.
         """
-        return self.store.update_label_schema(
+        return self.store.update_label_schema(  # type: ignore[no-any-return]
             schema_id,
             name=name,
             instruction=instruction,
@@ -1005,7 +1027,7 @@ class TracingClient:
 
     def _delete_label_schema(self, schema_id: str) -> None:
         """Delete a label schema. No-op when the schema doesn't exist."""
-        return self.store.delete_label_schema(schema_id)
+        return self.store.delete_label_schema(schema_id)  # type: ignore[no-any-return]
 
     # ----- Review queues (tracking-store CRUD) -----
 
@@ -1019,7 +1041,7 @@ class TracingClient:
         schema_ids: list[str] | None = None,
     ) -> "ReviewQueue":
         # `created_by` (the owner) is stamped server-side, never by the client.
-        return self.store.create_review_queue(
+        return self.store.create_review_queue(  # type: ignore[no-any-return]
             experiment_id,
             name=name,
             queue_type=queue_type,
@@ -1028,13 +1050,13 @@ class TracingClient:
         )
 
     def _get_or_create_user_queue(self, experiment_id: str, *, user: str) -> "ReviewQueue":
-        return self.store.get_or_create_user_queue(experiment_id, user=user)
+        return self.store.get_or_create_user_queue(experiment_id, user=user)  # type: ignore[no-any-return]
 
     def _get_review_queue(self, queue_id: str) -> "ReviewQueue":
-        return self.store.get_review_queue(queue_id)
+        return self.store.get_review_queue(queue_id)  # type: ignore[no-any-return]
 
     def _get_review_queue_by_name(self, experiment_id: str, name: str) -> "ReviewQueue":
-        return self.store.get_review_queue_by_name(experiment_id, name=name)
+        return self.store.get_review_queue_by_name(experiment_id, name=name)  # type: ignore[no-any-return]
 
     def _list_review_queues(
         self,
@@ -1044,7 +1066,7 @@ class TracingClient:
         max_results: int | None = None,
         page_token: str | None = None,
     ) -> "PagedList[ReviewQueue]":
-        return self.store.list_review_queues(
+        return self.store.list_review_queues(  # type: ignore[no-any-return]
             experiment_id, user=user, max_results=max_results, page_token=page_token
         )
 
@@ -1057,12 +1079,12 @@ class TracingClient:
         users: list[str] | None = None,
         schema_ids: list[str] | None = None,
     ) -> "ReviewQueue":
-        return self.store.update_review_queue(
+        return self.store.update_review_queue(  # type: ignore[no-any-return]
             queue_id, name=name, new_owner=new_owner, users=users, schema_ids=schema_ids
         )
 
     def _delete_review_queue(self, queue_id: str) -> None:
-        return self.store.delete_review_queue(queue_id)
+        return self.store.delete_review_queue(queue_id)  # type: ignore[no-any-return]
 
     def _add_items_to_review_queue(
         self,
@@ -1071,12 +1093,14 @@ class TracingClient:
         item_ids: list[str],
         item_type: "ReviewItemType | str" = "trace",
     ) -> "list[ReviewQueueItem]":
-        return self.store.add_items_to_review_queue(
+        return self.store.add_items_to_review_queue(  # type: ignore[no-any-return]
             queue_id, item_ids=item_ids, item_type=item_type
         )
 
     def _remove_items_from_review_queue(self, queue_id: str, *, item_ids: list[str]) -> None:
-        return self.store.remove_items_from_review_queue(queue_id, item_ids=item_ids)
+        return self.store.remove_items_from_review_queue(  # type: ignore[no-any-return]
+            queue_id, item_ids=item_ids
+        )
 
     def _list_review_queue_items(
         self,
@@ -1086,7 +1110,7 @@ class TracingClient:
         max_results: int | None = None,
         page_token: str | None = None,
     ) -> "PagedList[ReviewQueueItem]":
-        return self.store.list_review_queue_items(
+        return self.store.list_review_queue_items(  # type: ignore[no-any-return]
             queue_id, status=status, max_results=max_results, page_token=page_token
         )
 
@@ -1098,6 +1122,6 @@ class TracingClient:
         status: "ReviewStatus | str",
         completed_by: str | None = None,
     ) -> "ReviewQueueItem":
-        return self.store.set_review_queue_item_status(
+        return self.store.set_review_queue_item_status(  # type: ignore[no-any-return]
             queue_id, item_id=item_id, status=status, completed_by=completed_by
         )

@@ -8,10 +8,11 @@ import logging
 import os
 import sys
 from itertools import zip_longest
-from typing import TYPE_CHECKING, Any, Literal
+from typing import TYPE_CHECKING, Any, Iterator, Literal, Sequence, cast
 from urllib import parse as urllib_parse
 
 from mlflow.entities import (
+    Experiment,
     ExperimentTag,
     FileInfo,
     LoggedModel,
@@ -22,6 +23,7 @@ from mlflow.entities import (
     LoggedModelTag,
     Metric,
     Param,
+    Run,
     RunStatus,
     RunTag,
     ViewType,
@@ -85,7 +87,7 @@ class TrackingServiceClient:
     Client of an MLflow Tracking Server that creates and manages experiments and runs.
     """
 
-    def __init__(self, tracking_uri):
+    def __init__(self, tracking_uri: str):
         """
         Args:
             tracking_uri: Address of local or remote tracking server.
@@ -101,7 +103,7 @@ class TrackingServiceClient:
     def store(self):
         return utils._get_store(self.tracking_uri)
 
-    def get_run(self, run_id):
+    def get_run(self, run_id: str) -> Run:
         """Fetch the run from backend store. The resulting :py:class:`Run <mlflow.entities.Run>`
         contains a collection of run metadata -- :py:class:`RunInfo <mlflow.entities.RunInfo>`,
         as well as a collection of run parameters, tags, and metrics --
@@ -118,9 +120,10 @@ class TrackingServiceClient:
 
         """
         _validate_run_id(run_id)
-        return self.store.get_run(run_id)
+        run: Run = self.store.get_run(run_id)
+        return run
 
-    def get_metric_history(self, run_id, key):
+    def get_metric_history(self, run_id: str, key: str) -> list[Metric]:
         """Return a list of metric objects corresponding to all values logged for a given metric.
 
         Args:
@@ -135,7 +138,9 @@ class TrackingServiceClient:
         # FileStore and SQLAlchemy store do not provide support for paginated queries and will
         # raise an MlflowException if the `page_token` argument is not None when calling this
         # API for a continuation query.
-        history = self.store.get_metric_history(
+        # The store contract for paginated queries is `PagedList`; typed locally because the
+        # `AbstractStore` interface is not annotated.
+        history: PagedList[Metric] = self.store.get_metric_history(
             run_id=run_id,
             metric_key=key,
             max_results=GET_METRIC_HISTORY_MAX_RESULTS,
@@ -156,7 +161,13 @@ class TrackingServiceClient:
         return history
 
     @record_usage_event(CreateRunEvent)
-    def create_run(self, experiment_id, start_time=None, tags=None, run_name=None):
+    def create_run(
+        self,
+        experiment_id: str,
+        start_time: int | None = None,
+        tags: dict[str, Any] | None = None,
+        run_name: str | None = None,
+    ) -> Run:
         """Create a :py:class:`mlflow.entities.Run` object that can be associated with
         metrics, parameters, artifacts, etc.
         Unlike :py:func:`mlflow.projects.run`, creates objects but does not run code.
@@ -182,22 +193,23 @@ class TrackingServiceClient:
         # in a later release.
         user_id = tags.get(MLFLOW_USER, "unknown")
 
-        return self.store.create_run(
+        run: Run = self.store.create_run(
             experiment_id=experiment_id,
             user_id=user_id,
             start_time=start_time or get_current_time_millis(),
             tags=[RunTag(key, value) for (key, value) in tags.items()],
             run_name=run_name,
         )
+        return run
 
     def search_experiments(
         self,
-        view_type=ViewType.ACTIVE_ONLY,
-        max_results=SEARCH_MAX_RESULTS_DEFAULT,
-        filter_string=None,
-        order_by=None,
-        page_token=None,
-    ):
+        view_type: int = ViewType.ACTIVE_ONLY,
+        max_results: int = SEARCH_MAX_RESULTS_DEFAULT,
+        filter_string: str | None = None,
+        order_by: list[str] | None = None,
+        page_token: str | None = None,
+    ) -> PagedList[Experiment]:
         """Search for experiments that match the specified search query.
 
         Args:
@@ -253,15 +265,16 @@ class TrackingServiceClient:
             for the next page can be obtained via the ``token`` attribute of the object.
 
         """
-        return self.store.search_experiments(
+        experiments: PagedList[Experiment] = self.store.search_experiments(
             view_type=view_type,
             max_results=max_results,
             filter_string=filter_string,
             order_by=order_by,
             page_token=page_token,
         )
+        return experiments
 
-    def get_experiment(self, experiment_id):
+    def get_experiment(self, experiment_id: str) -> Experiment:
         """
         Args:
             experiment_id: The experiment ID returned from ``create_experiment``.
@@ -269,9 +282,10 @@ class TrackingServiceClient:
         Returns:
             :py:class:`mlflow.entities.Experiment`
         """
-        return self.store.get_experiment(experiment_id)
+        experiment: Experiment = self.store.get_experiment(experiment_id)
+        return experiment
 
-    def get_experiment_by_name(self, name):
+    def get_experiment_by_name(self, name: str) -> Experiment:
         """
         Args:
             name: The experiment name.
@@ -279,10 +293,13 @@ class TrackingServiceClient:
         Returns:
             :py:class:`mlflow.entities.Experiment`
         """
-        return self.store.get_experiment_by_name(name)
+        experiment: Experiment = self.store.get_experiment_by_name(name)
+        return experiment
 
     @record_usage_event(CreateExperimentEvent)
-    def create_experiment(self, name, artifact_location=None, tags=None):
+    def create_experiment(
+        self, name: str, artifact_location: str | None = None, tags: dict[str, Any] | None = None
+    ) -> str:
         """Create an experiment.
 
         Args:
@@ -297,13 +314,14 @@ class TrackingServiceClient:
 
         """
         _validate_experiment_artifact_location(artifact_location)
-        return self.store.create_experiment(
+        experiment_id: str = self.store.create_experiment(
             name=name,
             artifact_location=artifact_location,
             tags=[ExperimentTag(key, value) for (key, value) in tags.items()] if tags else [],
         )
+        return experiment_id
 
-    def delete_experiment(self, experiment_id):
+    def delete_experiment(self, experiment_id: str) -> None:
         """Delete an experiment from the backend store.
 
         Args:
@@ -312,7 +330,7 @@ class TrackingServiceClient:
         """
         self.store.delete_experiment(experiment_id)
 
-    def restore_experiment(self, experiment_id):
+    def restore_experiment(self, experiment_id: str) -> None:
         """Restore a deleted experiment unless permanently deleted.
 
         Args:
@@ -321,7 +339,7 @@ class TrackingServiceClient:
         """
         self.store.restore_experiment(experiment_id)
 
-    def rename_experiment(self, experiment_id, new_name):
+    def rename_experiment(self, experiment_id: str, new_name: str) -> None:
         """Update an experiment's name. The new name must be unique.
 
         Args:
@@ -334,12 +352,12 @@ class TrackingServiceClient:
     @record_usage_event(LogMetricEvent)
     def log_metric(
         self,
-        run_id,
-        key,
-        value,
-        timestamp=None,
-        step=None,
-        synchronous=True,
+        run_id: str,
+        key: str,
+        value: Any,
+        timestamp: int | None = None,
+        step: int | None = None,
+        synchronous: bool = True,
         dataset_name: str | None = None,
         dataset_digest: str | None = None,
         model_id: str | None = None,
@@ -385,11 +403,13 @@ class TrackingServiceClient:
         )
         if synchronous:
             self.store.log_metric(run_id, metric)
-        else:
-            return self.store.log_metric_async(run_id, metric)
+            return None
+        # The store interface is unannotated; the async contract returns RunOperations.
+        run_operations: RunOperations = self.store.log_metric_async(run_id, metric)
+        return run_operations
 
     @record_usage_event(LogParamEvent)
-    def log_param(self, run_id, key, value, synchronous=True):
+    def log_param(self, run_id: str, key: str, value: Any, synchronous: bool = True) -> Any:
         """Log a parameter (e.g. model hyperparameter) against the run ID. Value is converted to
         a string.
 
@@ -421,7 +441,7 @@ class TrackingServiceClient:
             else:
                 raise e
 
-    def set_experiment_tag(self, experiment_id, key, value):
+    def set_experiment_tag(self, experiment_id: str, key: str, value: Any) -> None:
         """Set a tag on the experiment with the specified ID. Value is converted to a string.
 
         Args:
@@ -432,7 +452,7 @@ class TrackingServiceClient:
         tag = ExperimentTag(key, str(value))
         self.store.set_experiment_tag(experiment_id, tag)
 
-    def delete_experiment_tag(self, experiment_id, key):
+    def delete_experiment_tag(self, experiment_id: str, key: str) -> None:
         """Delete a tag from the experiment with the specified ID.
 
         Args:
@@ -441,7 +461,9 @@ class TrackingServiceClient:
         """
         self.store.delete_experiment_tag(experiment_id, key)
 
-    def set_tag(self, run_id, key, value, synchronous=True) -> RunOperations | None:
+    def set_tag(
+        self, run_id: str, key: str, value: Any, synchronous: bool = True
+    ) -> RunOperations | None:
         """Set a tag on the run with the specified ID. Value is converted to a string.
 
         Args:
@@ -466,10 +488,12 @@ class TrackingServiceClient:
         tag = RunTag(key, str(value))
         if synchronous:
             self.store.set_tag(run_id, tag)
-        else:
-            return self.store.set_tag_async(run_id, tag)
+            return None
+        # The store interface is unannotated; the async contract returns RunOperations.
+        run_operations: RunOperations = self.store.set_tag_async(run_id, tag)
+        return run_operations
 
-    def delete_tag(self, run_id, key):
+    def delete_tag(self, run_id: str, key: str) -> None:
         """Delete a tag from a run. This is irreversible.
 
         Args:
@@ -479,7 +503,7 @@ class TrackingServiceClient:
         """
         self.store.delete_tag(run_id, key)
 
-    def update_run(self, run_id, status=None, name=None):
+    def update_run(self, run_id: str, status: str | None = None, name: str | None = None) -> None:
         """Update a run with the specified ID to a new status or name.
 
         Args:
@@ -505,7 +529,12 @@ class TrackingServiceClient:
 
     @record_usage_event(LogBatchEvent)
     def log_batch(
-        self, run_id, metrics=(), params=(), tags=(), synchronous=True
+        self,
+        run_id: str,
+        metrics: Sequence[Metric] = (),
+        params: Sequence[Param] = (),
+        tags: Sequence[RunTag] = (),
+        synchronous: bool = True,
     ) -> RunOperations | None:
         """Log multiple metrics, params, and/or tags.
 
@@ -530,7 +559,7 @@ class TrackingServiceClient:
         from mlflow.tracking.fluent import get_active_model_id
 
         if len(metrics) == 0 and len(params) == 0 and len(tags) == 0:
-            return
+            return None
 
         metrics = [
             Metric(
@@ -546,8 +575,9 @@ class TrackingServiceClient:
             for metric in metrics
         ]
 
-        param_batches = chunk_list(params, MAX_PARAMS_TAGS_PER_BATCH)
-        tag_batches = chunk_list(tags, MAX_PARAMS_TAGS_PER_BATCH)
+        # chunk_list is unannotated; typed locals pin the batch element types for the loop below.
+        param_batches: list[list[Param]] = chunk_list(params, MAX_PARAMS_TAGS_PER_BATCH)
+        tag_batches: list[list[RunTag]] = chunk_list(tags, MAX_PARAMS_TAGS_PER_BATCH)
 
         # When given data is split into one or more batches, we need to wait for all the batches.
         # Each batch logged returns run_operations which we append to this list
@@ -555,7 +585,12 @@ class TrackingServiceClient:
         # Applicable only when synchronous is False
         run_operations_list = []
 
-        for params_batch, tags_batch in zip_longest(param_batches, tag_batches, fillvalue=[]):
+        # zip_longest yields variadic tuples mypy cannot infer for-targets from; each yielded
+        # pair is (param chunk, tag chunk) with [] filling whichever sequence ran out.
+        for params_batch, tags_batch in cast(
+            "Iterator[tuple[list[Param], list[RunTag]]]",
+            zip_longest(param_batches, tag_batches, fillvalue=[]),
+        ):
             metrics_batch_size = min(
                 MAX_ENTITIES_PER_BATCH - len(params_batch) - len(tags_batch),
                 MAX_METRICS_PER_BATCH,
@@ -591,6 +626,7 @@ class TrackingServiceClient:
         if not synchronous:
             # Merge all the run operations into a single run operations object
             return get_combined_run_operations(run_operations_list)
+        return None
 
     @record_usage_event(LogDatasetEvent)
     def log_inputs(
@@ -598,7 +634,7 @@ class TrackingServiceClient:
         run_id: str,
         datasets: list[DatasetInput] | None = None,
         models: list[LoggedModelInput] | None = None,
-    ):
+    ) -> None:
         """Log one or more dataset inputs to a run.
 
         Args:
@@ -614,7 +650,7 @@ class TrackingServiceClient:
         """
         self.store.log_inputs(run_id=run_id, datasets=datasets, models=models)
 
-    def log_outputs(self, run_id: str, models: list[LoggedModelOutput]):
+    def log_outputs(self, run_id: str, models: list[LoggedModelOutput]) -> None:
         self.store.log_outputs(run_id=run_id, models=models)
 
     def _record_logged_model(self, run_id, mlflow_model):
@@ -657,7 +693,7 @@ class TrackingServiceClient:
             utils._artifact_repos_cache[resource_id] = artifact_repo
             return artifact_repo
 
-    def log_artifact(self, run_id, local_path, artifact_path=None):
+    def log_artifact(self, run_id: str, local_path: str, artifact_path: str | None = None) -> None:
         """
         Write a local file or directory to the remote ``artifact_uri``.
 
@@ -689,7 +725,7 @@ class TrackingServiceClient:
         artifact_repo = self._get_artifact_repo(run_id)
         artifact_repo._log_artifact_async(filename, artifact_path, artifact)
 
-    def log_artifacts(self, run_id, local_dir, artifact_path=None):
+    def log_artifacts(self, run_id: str, local_dir: str, artifact_path: str | None = None) -> None:
         """Write a directory of files to the remote ``artifact_uri``.
 
         Args:
@@ -700,7 +736,7 @@ class TrackingServiceClient:
         """
         self._get_artifact_repo(run_id).log_artifacts(local_dir, artifact_path)
 
-    def list_artifacts(self, run_id, path=None):
+    def list_artifacts(self, run_id: str, path: str | None = None) -> list[FileInfo]:
         """List the artifacts for a run.
 
         Args:
@@ -729,7 +765,7 @@ class TrackingServiceClient:
         """
         return self._get_artifact_repo(model_id, resource="logged_model").list_artifacts(path)
 
-    def download_artifacts(self, run_id: str, path: str, dst_path: str | None = None):
+    def download_artifacts(self, run_id: str, path: str, dst_path: str | None = None) -> str:
         """Download an artifact file or directory from a run to a local directory if applicable,
         and return a local path for it.
 
@@ -785,7 +821,9 @@ class TrackingServiceClient:
         sys.stdout.write(f"🏃 View run {run_name} at: {run_url}\n")
         sys.stdout.write(f"🧪 View experiment at: {experiment_url}\n")
 
-    def set_terminated(self, run_id, status=None, end_time=None):
+    def set_terminated(
+        self, run_id: str, status: str | None = None, end_time: int | None = None
+    ) -> None:
         """Set a run's status to terminated.
 
         Args:
@@ -807,13 +845,13 @@ class TrackingServiceClient:
             run_name=None,
         )
 
-    def delete_run(self, run_id):
+    def delete_run(self, run_id: str) -> None:
         """
         Deletes a run with the given ID.
         """
         self.store.delete_run(run_id)
 
-    def restore_run(self, run_id):
+    def restore_run(self, run_id: str) -> None:
         """
         Restores a deleted run with the given ID.
         """
@@ -821,13 +859,14 @@ class TrackingServiceClient:
 
     def search_runs(
         self,
-        experiment_ids,
-        filter_string="",
-        run_view_type=ViewType.ACTIVE_ONLY,
-        max_results=SEARCH_MAX_RESULTS_DEFAULT,
-        order_by=None,
-        page_token=None,
-    ):
+        # Accepts a single id or a sequence of ids; normalized in place below.
+        experiment_ids: Any,
+        filter_string: str = "",
+        run_view_type: int = ViewType.ACTIVE_ONLY,
+        max_results: int = SEARCH_MAX_RESULTS_DEFAULT,
+        order_by: list[str] | None = None,
+        page_token: str | None = None,
+    ) -> PagedList[Run]:
         """Search experiments that fit the search criteria.
 
         Args:
@@ -851,7 +890,7 @@ class TrackingServiceClient:
         """
         if isinstance(experiment_ids, int) or is_string_type(experiment_ids):
             experiment_ids = [experiment_ids]
-        return self.store.search_runs(
+        runs: PagedList[Run] = self.store.search_runs(
             experiment_ids=experiment_ids,
             filter_string=filter_string,
             run_view_type=run_view_type,
@@ -859,6 +898,7 @@ class TrackingServiceClient:
             order_by=order_by,
             page_token=page_token,
         )
+        return runs
 
     @record_usage_event(CreateLoggedModelEvent)
     def create_logged_model(
@@ -875,7 +915,8 @@ class TrackingServiceClient:
         serialization_format: str | None = None,
         uses_uv: bool = False,
     ) -> LoggedModel:
-        return self.store.create_logged_model(
+        # The store interface is unannotated; typed locals bridge its results to the entity types.
+        logged_model: LoggedModel = self.store.create_logged_model(
             experiment_id=experiment_id,
             name=name,
             source_run_id=source_run_id,
@@ -887,22 +928,25 @@ class TrackingServiceClient:
             else params,
             model_type=model_type,
         )
+        return logged_model
 
     def log_model_params(self, model_id: str, params: dict[str, str]) -> None:
-        return self.store.log_logged_model_params(
+        self.store.log_logged_model_params(
             model_id=model_id,
             params=[LoggedModelParameter(str(key), str(value)) for key, value in params.items()],
         )
 
     def finalize_logged_model(self, model_id: str, status: LoggedModelStatus) -> LoggedModel:
-        return self.store.finalize_logged_model(model_id, status)
+        logged_model: LoggedModel = self.store.finalize_logged_model(model_id, status)
+        return logged_model
 
     @record_usage_event(GetLoggedModelEvent)
     def get_logged_model(self, model_id: str) -> LoggedModel:
-        return self.store.get_logged_model(model_id)
+        logged_model: LoggedModel = self.store.get_logged_model(model_id)
+        return logged_model
 
     def delete_logged_model(self, model_id: str) -> None:
-        return self.store.delete_logged_model(model_id)
+        self.store.delete_logged_model(model_id)
 
     def set_logged_model_tags(self, model_id: str, tags: dict[str, Any]) -> None:
         self.store.set_logged_model_tags(
@@ -910,7 +954,7 @@ class TrackingServiceClient:
         )
 
     def delete_logged_model_tag(self, model_id: str, key: str) -> None:
-        return self.store.delete_logged_model_tag(model_id, key)
+        self.store.delete_logged_model_tag(model_id, key)
 
     def log_model_artifact(
         self, model_id: str, local_path: str, artifact_path: str | None = None
@@ -934,16 +978,17 @@ class TrackingServiceClient:
         max_results: int | None = None,
         order_by: list[dict[str, Any]] | None = None,
         page_token: str | None = None,
-    ):
+    ) -> PagedList[LoggedModel]:
         if not isinstance(experiment_ids, list) or not all(
             isinstance(eid, str) for eid in experiment_ids
         ):
             raise MlflowException.invalid_parameter_value(
                 f"experiment_ids must be a list of strings, got {type(experiment_ids)}",
             )
-        return self.store.search_logged_models(
+        models: PagedList[LoggedModel] = self.store.search_logged_models(
             experiment_ids, filter_string, datasets, max_results, order_by, page_token
         )
+        return models
 
     @record_usage_event(CreateDatasetEvent)
     def create_dataset(
@@ -1018,13 +1063,14 @@ class TrackingServiceClient:
         Returns:
             A PagedList of EvaluationDataset objects.
         """
-        return self.store.search_datasets(
+        datasets: PagedList["EvaluationDataset"] = self.store.search_datasets(
             experiment_ids=experiment_ids,
             filter_string=filter_string,
             max_results=max_results,
             order_by=order_by,
             page_token=page_token,
         )
+        return datasets
 
     def set_dataset_tags(self, dataset_id: str, tags: dict[str, Any]) -> None:
         """
@@ -1114,7 +1160,7 @@ class TrackingServiceClient:
                 f"Provided {len(trace_ids)} traces."
             )
 
-        return self.store.link_traces_to_run(trace_ids, run_id)
+        self.store.link_traces_to_run(trace_ids, run_id)
 
     def unlink_traces_from_run(self, trace_ids: list[str], run_id: str) -> None:
         """
@@ -1133,4 +1179,4 @@ class TrackingServiceClient:
         if not run_id:
             raise MlflowException.invalid_parameter_value("run_id cannot be empty")
 
-        return self.store.unlink_traces_from_run(trace_ids, run_id)
+        self.store.unlink_traces_from_run(trace_ids, run_id)
