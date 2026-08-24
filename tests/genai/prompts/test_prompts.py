@@ -2095,3 +2095,37 @@ def test_concurrent_prompt_linking_to_run_and_trace():
     assert trace_linked_prompts is not None
     trace_prompts = json.loads(trace_linked_prompts)
     assert any(p["name"] == "test" for p in trace_prompts)
+
+
+def test_search_prompts_returns_plain_list() -> None:
+    mlflow.genai.register_prompt(name="list_contract_a", template="Template A: {{x}}")
+    mlflow.genai.register_prompt(name="list_contract_b", template="Template B: {{y}}")
+
+    prompts = mlflow.genai.search_prompts(filter_string="name LIKE 'list_contract%'")
+
+    # Pagination is aggregated internally, so the result is a plain list, not a PagedList
+    assert type(prompts) is list
+    assert {p.name for p in prompts} == {"list_contract_a", "list_contract_b"}
+
+    prompts_with_limit = mlflow.genai.search_prompts(
+        filter_string="name LIKE 'list_contract%'", max_results=1
+    )
+    assert type(prompts_with_limit) is list
+    assert len(prompts_with_limit) == 1
+
+
+def test_load_prompt_missing_prompt_none_flow() -> None:
+    # allow_missing=True flows a None result through instead of raising
+    prompt = mlflow.genai.load_prompt("none_flow_prompt", version=1, allow_missing=True)
+    assert prompt is None
+
+    # Without allow_missing, a missing prompt raises rather than flowing None
+    with pytest.raises(MlflowException, match="not found") as exc_info:
+        mlflow.genai.load_prompt("none_flow_prompt", version=1)
+    assert exc_info.value.error_code == "RESOURCE_DOES_NOT_EXIST"
+
+
+def test_get_prompt_tags_nonexistent_prompt_raises() -> None:
+    with pytest.raises(MlflowException, match="does not exist") as exc_info:
+        mlflow.genai.get_prompt_tags("no_tags_prompt")
+    assert exc_info.value.error_code == "RESOURCE_DOES_NOT_EXIST"

@@ -11,10 +11,11 @@ from mlflow.entities.model_registry.prompt_version import (
     PromptModelConfig,
     PromptVersion,
 )
+from mlflow.exceptions import MlflowException
 from mlflow.prompt.constants import PROMPT_MODEL_CONFIG_TAG_KEY
 from mlflow.prompt.registry_utils import PromptCache as PromptCache
 from mlflow.prompt.registry_utils import require_prompt_registry
-from mlflow.store.entities.paged_list import PagedList
+from mlflow.protos.databricks_pb2 import RESOURCE_DOES_NOT_EXIST
 from mlflow.tracking.client import MlflowClient
 
 
@@ -147,7 +148,7 @@ def register_prompt(
 def search_prompts(
     filter_string: str | None = None,
     max_results: int | None = None,
-) -> PagedList[Prompt]:
+) -> list[Prompt]:
     with suppress_genai_migration_warning():
         return registry_api.search_prompts(filter_string=filter_string, max_results=max_results)
 
@@ -160,11 +161,12 @@ def load_prompt(
     link_to_model: bool = True,
     model_id: str | None = None,
     cache_ttl_seconds: float | None = None,
-) -> PromptVersion:
+) -> PromptVersion | None:
     """
     Load a :py:class:`Prompt <mlflow.entities.Prompt>` from the MLflow Prompt Registry.
 
-    The prompt can be specified by name and version, or by URI.
+    The prompt can be specified by name and version, or by URI. Returns ``None`` if the
+    prompt is not found and ``allow_missing`` is True.
 
     Args:
         name_or_uri: The name of the prompt, or the URI in the format "prompts:/name/version".
@@ -264,14 +266,20 @@ def delete_prompt_alias(name: str, alias: str) -> None:
 
 
 @require_prompt_registry
-def get_prompt_tags(name: str) -> Prompt:
+def get_prompt_tags(name: str) -> dict[str, str]:
     """Get a prompt's metadata from the MLflow Prompt Registry.
 
     Args:
         name: The name of the prompt.
+
+    Raises:
+        MlflowException: If no prompt exists with the given name.
     """
     with suppress_genai_migration_warning():
-        return MlflowClient().get_prompt(name=name).tags
+        prompt = MlflowClient().get_prompt(name=name)
+        if prompt is None:
+            raise MlflowException(f"Prompt '{name}' does not exist.", RESOURCE_DOES_NOT_EXIST)
+        return prompt.tags
 
 
 @require_prompt_registry
