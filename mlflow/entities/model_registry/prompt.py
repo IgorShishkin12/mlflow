@@ -55,7 +55,7 @@ class Prompt:
         """Prompt-level metadata as key-value pairs."""
         return self._tags.copy()
 
-    def __eq__(self, other) -> bool:
+    def __eq__(self, other: object) -> bool:
         if not isinstance(other, Prompt):
             return False
         return (

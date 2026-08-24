@@ -1,3 +1,5 @@
+from typing import cast
+
 from mlflow.entities.logged_model_parameter import LoggedModelParameter as ModelParam
 from mlflow.entities.metric import Metric
 from mlflow.entities.model_registry._model_registry_entity import _ModelRegistryEntity
@@ -8,6 +10,7 @@ from mlflow.entities.model_registry.model_version_status import ModelVersionStat
 from mlflow.entities.model_registry.model_version_tag import ModelVersionTag
 from mlflow.prompt.constants import IS_PROMPT_TAG_KEY
 from mlflow.protos.model_registry_pb2 import ModelVersion as ProtoModelVersion
+from mlflow.protos.model_registry_pb2 import ModelVersionStatus as ProtoModelVersionStatus
 from mlflow.protos.model_registry_pb2 import ModelVersionTag as ProtoModelVersionTag
 from mlflow.utils.workspace_utils import resolve_entity_workspace_name
 
@@ -40,7 +43,7 @@ class ModelVersion(_ModelRegistryEntity):
         metrics: list[Metric] | None = None,
         deployment_job_state: ModelVersionDeploymentJobState | None = None,
         workspace: str | None = None,
-    ):
+    ) -> None:
         super().__init__()
         self._name: str = name
         self._version: str = version
@@ -68,7 +71,7 @@ class ModelVersion(_ModelRegistryEntity):
         return self._name
 
     @name.setter
-    def name(self, new_name: str):
+    def name(self, new_name: str) -> None:
         self._name = new_name
 
     @property
@@ -89,7 +92,7 @@ class ModelVersion(_ModelRegistryEntity):
         return self._last_updated_timestamp
 
     @last_updated_timestamp.setter
-    def last_updated_timestamp(self, updated_timestamp: int):
+    def last_updated_timestamp(self, updated_timestamp: int) -> None:
         self._last_updated_timestamp = updated_timestamp
 
     @property
@@ -98,7 +101,7 @@ class ModelVersion(_ModelRegistryEntity):
         return self._description
 
     @description.setter
-    def description(self, description: str):
+    def description(self, description: str) -> None:
         self._description = description
 
     @property
@@ -112,7 +115,7 @@ class ModelVersion(_ModelRegistryEntity):
         return self._current_stage
 
     @current_stage.setter
-    def current_stage(self, stage: str):
+    def current_stage(self, stage: str) -> None:
         self._current_stage = stage
 
     @property
@@ -155,7 +158,7 @@ class ModelVersion(_ModelRegistryEntity):
         return self._aliases
 
     @aliases.setter
-    def aliases(self, aliases: list[str]):
+    def aliases(self, aliases: list[str]) -> None:
         self._aliases = aliases
 
     @property
@@ -192,7 +195,7 @@ class ModelVersion(_ModelRegistryEntity):
 
     # proto mappers
     @classmethod
-    def from_proto(cls, proto) -> "ModelVersion":
+    def from_proto(cls, proto: ProtoModelVersion) -> "ModelVersion":
         # input: mlflow.protos.model_registry_pb2.ModelVersion
         # returns: ModelVersion entity
         model_version = cls(
@@ -218,7 +221,7 @@ class ModelVersion(_ModelRegistryEntity):
         # TODO: Include params, metrics, and model ID in proto
         return model_version
 
-    def to_proto(self):
+    def to_proto(self) -> ProtoModelVersion:
         # input: ModelVersion entity
         # returns mlflow.protos.model_registry_pb2.ModelVersion
         model_version = ProtoModelVersion()
@@ -240,7 +243,11 @@ class ModelVersion(_ModelRegistryEntity):
         if self.run_link is not None:
             model_version.run_link = str(self.run_link)
         if self.status is not None:
-            model_version.status = ModelVersionStatus.from_string(self.status)
+            # The proto field is typed as the protobuf enum wrapper (an int subclass), while
+            # `ModelVersionStatus.from_string` returns a plain `int`, hence the cast.
+            model_version.status = cast(
+                ProtoModelVersionStatus, ModelVersionStatus.from_string(self.status)
+            )
         if self.status_message:
             model_version.status_message = self.status_message
         model_version.tags.extend([

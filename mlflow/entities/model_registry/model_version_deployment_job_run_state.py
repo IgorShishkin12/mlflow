@@ -8,21 +8,23 @@ class ModelVersionDeploymentJobRunState:
     :py:class:`mlflow.entities.model_registry.ModelVersion`.
     """
 
-    NO_VALID_DEPLOYMENT_JOB_FOUND = ProtoModelVersionDeploymentJobState.DeploymentJobRunState.Value(
-        "NO_VALID_DEPLOYMENT_JOB_FOUND"
+    NO_VALID_DEPLOYMENT_JOB_FOUND: int = (
+        ProtoModelVersionDeploymentJobState.DeploymentJobRunState.Value(
+            "NO_VALID_DEPLOYMENT_JOB_FOUND"
+        )
     )
-    RUNNING = ProtoModelVersionDeploymentJobState.DeploymentJobRunState.Value("RUNNING")
-    SUCCEEDED = ProtoModelVersionDeploymentJobState.DeploymentJobRunState.Value("SUCCEEDED")
-    FAILED = ProtoModelVersionDeploymentJobState.DeploymentJobRunState.Value("FAILED")
-    PENDING = ProtoModelVersionDeploymentJobState.DeploymentJobRunState.Value("PENDING")
-    _STRING_TO_STATE = {
+    RUNNING: int = ProtoModelVersionDeploymentJobState.DeploymentJobRunState.Value("RUNNING")
+    SUCCEEDED: int = ProtoModelVersionDeploymentJobState.DeploymentJobRunState.Value("SUCCEEDED")
+    FAILED: int = ProtoModelVersionDeploymentJobState.DeploymentJobRunState.Value("FAILED")
+    PENDING: int = ProtoModelVersionDeploymentJobState.DeploymentJobRunState.Value("PENDING")
+    _STRING_TO_STATE: dict[str, int] = {
         k: ProtoModelVersionDeploymentJobState.DeploymentJobRunState.Value(k)
         for k in ProtoModelVersionDeploymentJobState.DeploymentJobRunState.keys()
     }
     _STATE_TO_STRING = {value: key for key, value in _STRING_TO_STATE.items()}
 
     @staticmethod
-    def from_string(state_str):
+    def from_string(state_str: str) -> int:
         if state_str not in ModelVersionDeploymentJobRunState._STRING_TO_STATE:
             raise Exception(
                 f"Could not get deployment job run state corresponding to string {state_str}. "
@@ -31,7 +33,7 @@ class ModelVersionDeploymentJobRunState:
         return ModelVersionDeploymentJobRunState._STRING_TO_STATE[state_str]
 
     @staticmethod
-    def to_string(state):
+    def to_string(state: int) -> str:
         if state not in ModelVersionDeploymentJobRunState._STATE_TO_STRING:
             raise Exception(
                 f"Could not get string corresponding to deployment job run {state}. "
@@ -40,5 +42,5 @@ class ModelVersionDeploymentJobRunState:
         return ModelVersionDeploymentJobRunState._STATE_TO_STRING[state]
 
     @staticmethod
-    def all_states():
+    def all_states() -> list[int]:
         return list(ModelVersionDeploymentJobRunState._STATE_TO_STRING.keys())
