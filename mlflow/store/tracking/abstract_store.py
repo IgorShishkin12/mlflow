@@ -8,6 +8,10 @@ from mlflow.entities import (
     Assessment,
     DatasetInput,
     DatasetRecord,
+    Expectation,
+    Experiment,
+    ExperimentTag,
+    Feedback,
     Issue,
     IssueSeverity,
     IssueStatus,
@@ -17,7 +21,13 @@ from mlflow.entities import (
     LoggedModelParameter,
     LoggedModelStatus,
     LoggedModelTag,
+    Metric,
+    Param,
+    Run,
+    RunInfo,
+    RunTag,
     ScorerVersion,
+    Span,
     ViewType,
 )
 from mlflow.entities.model_registry import PromptVersion
@@ -36,8 +46,9 @@ if TYPE_CHECKING:
         OnlineScorer,
         OnlineScoringConfig,
     )
+    from mlflow.models import Model
 from mlflow.entities.metric import MetricWithRunId
-from mlflow.entities.trace import Span, Trace
+from mlflow.entities.trace import Trace
 from mlflow.entities.trace_info import TraceInfo
 from mlflow.entities.workspace import TraceArchivalConfig
 from mlflow.exceptions import MlflowException, MlflowNotImplementedException
@@ -86,12 +97,12 @@ class AbstractStore(MCPServerRegistryMixin, GatewayStoreMixin):
     @abstractmethod
     def search_experiments(
         self,
-        view_type=ViewType.ACTIVE_ONLY,
-        max_results=SEARCH_MAX_RESULTS_DEFAULT,
-        filter_string=None,
-        order_by=None,
-        page_token=None,
-    ):
+        view_type: int = ViewType.ACTIVE_ONLY,
+        max_results: int = SEARCH_MAX_RESULTS_DEFAULT,
+        filter_string: str | None = None,
+        order_by: list[str] | None = None,
+        page_token: str | None = None,
+    ) -> PagedList[Experiment]:
         """
         Search for experiments that match the specified search query.
 
@@ -150,7 +161,12 @@ class AbstractStore(MCPServerRegistryMixin, GatewayStoreMixin):
         """
 
     @abstractmethod
-    def create_experiment(self, name, artifact_location, tags):
+    def create_experiment(
+        self,
+        name: str,
+        artifact_location: str | None,
+        tags: list[ExperimentTag] | None,
+    ) -> str:
         """
         Create a new experiment.
         If an experiment with the given name already exists, throws exception.
@@ -166,7 +182,7 @@ class AbstractStore(MCPServerRegistryMixin, GatewayStoreMixin):
         """
 
     @abstractmethod
-    def get_experiment(self, experiment_id):
+    def get_experiment(self, experiment_id: str) -> Experiment:
         """
         Fetch the experiment by ID from the backend store.
 
@@ -178,7 +194,12 @@ class AbstractStore(MCPServerRegistryMixin, GatewayStoreMixin):
             otherwise raises an exception.
         """
 
-    def get_experiment_by_name(self, experiment_name):
+    # Deliberately not abstract: the empty body is inherited as-is by stores that
+    # don't offer name-based lookup; every concrete tracking store overrides it.
+    def get_experiment_by_name(  # type: ignore[empty-body]
+        self,
+        experiment_name: str,
+    ) -> Experiment:
         """
         Fetch the experiment by name from the backend store.
 
@@ -190,7 +211,7 @@ class AbstractStore(MCPServerRegistryMixin, GatewayStoreMixin):
         """
 
     @abstractmethod
-    def delete_experiment(self, experiment_id):
+    def delete_experiment(self, experiment_id: str) -> None:
         """
         Delete the experiment from the backend store. Deleted experiments can be restored until
         permanently deleted.
@@ -200,7 +221,7 @@ class AbstractStore(MCPServerRegistryMixin, GatewayStoreMixin):
         """
 
     @abstractmethod
-    def restore_experiment(self, experiment_id):
+    def restore_experiment(self, experiment_id: str) -> None:
         """
         Restore deleted experiment unless it is permanently deleted.
 
@@ -209,7 +230,7 @@ class AbstractStore(MCPServerRegistryMixin, GatewayStoreMixin):
         """
 
     @abstractmethod
-    def rename_experiment(self, experiment_id, new_name):
+    def rename_experiment(self, experiment_id: str, new_name: str) -> None:
         """
         Update an experiment's name. The new name must be unique.
 
@@ -219,7 +240,7 @@ class AbstractStore(MCPServerRegistryMixin, GatewayStoreMixin):
         """
 
     @abstractmethod
-    def get_run(self, run_id):
+    def get_run(self, run_id: str) -> Run:
         """
         Fetch the run from backend store. The resulting :py:class:`Run <mlflow.entities.Run>`
         contains a collection of run metadata - :py:class:`RunInfo <mlflow.entities.RunInfo>`,
@@ -238,7 +259,13 @@ class AbstractStore(MCPServerRegistryMixin, GatewayStoreMixin):
         """
 
     @abstractmethod
-    def update_run_info(self, run_id, run_status, end_time, run_name):
+    def update_run_info(
+        self,
+        run_id: str,
+        run_status: int | None,
+        end_time: int | None,
+        run_name: str | None,
+    ) -> RunInfo:
         """
         Update the metadata of the specified run.
 
@@ -247,7 +274,14 @@ class AbstractStore(MCPServerRegistryMixin, GatewayStoreMixin):
         """
 
     @abstractmethod
-    def create_run(self, experiment_id, user_id, start_time, tags, run_name):
+    def create_run(
+        self,
+        experiment_id: str,
+        user_id: str,
+        start_time: int,
+        tags: list[RunTag] | None,
+        run_name: str | None,
+    ) -> Run:
         """
         Create a run under the specified experiment ID, setting the run's status to "RUNNING"
         and the start time to the current time.
@@ -264,7 +298,7 @@ class AbstractStore(MCPServerRegistryMixin, GatewayStoreMixin):
         """
 
     @abstractmethod
-    def delete_run(self, run_id):
+    def delete_run(self, run_id: str) -> None:
         """
         Delete a run.
 
@@ -274,7 +308,7 @@ class AbstractStore(MCPServerRegistryMixin, GatewayStoreMixin):
         """
 
     @abstractmethod
-    def restore_run(self, run_id):
+    def restore_run(self, run_id: str) -> None:
         """
         Restore a run.
 
@@ -581,7 +615,7 @@ class AbstractStore(MCPServerRegistryMixin, GatewayStoreMixin):
         """
         raise MlflowNotImplementedException()
 
-    def set_trace_tag(self, trace_id: str, key: str, value: str):
+    def set_trace_tag(self, trace_id: str, key: str, value: str) -> None:
         """
         Set a tag on the trace with the given trace_id.
 
@@ -592,7 +626,7 @@ class AbstractStore(MCPServerRegistryMixin, GatewayStoreMixin):
         """
         raise NotImplementedError
 
-    def delete_trace_tag(self, trace_id: str, key: str):
+    def delete_trace_tag(self, trace_id: str, key: str) -> None:
         """
         Delete a tag on the trace with the given trace_id.
 
@@ -636,8 +670,8 @@ class AbstractStore(MCPServerRegistryMixin, GatewayStoreMixin):
         trace_id: str,
         assessment_id: str,
         name: str | None = None,
-        expectation: str | None = None,
-        feedback: str | None = None,
+        expectation: Expectation | None = None,
+        feedback: Feedback | None = None,
         rationale: str | None = None,
         metadata: dict[str, str] | None = None,
     ) -> Assessment:
@@ -661,7 +695,7 @@ class AbstractStore(MCPServerRegistryMixin, GatewayStoreMixin):
         """
         raise NotImplementedError
 
-    def delete_assessment(self, trace_id: str, assessment_id):
+    def delete_assessment(self, trace_id: str, assessment_id: str) -> None:
         """
         Delete an assessment for a given trace.
 
@@ -760,7 +794,9 @@ class AbstractStore(MCPServerRegistryMixin, GatewayStoreMixin):
         """
         raise MlflowNotImplementedException()
 
-    def log_spans(self, location: str, spans: list[Span], tracking_uri=None) -> list[Span]:
+    def log_spans(
+        self, location: str, spans: list[Span], tracking_uri: str | None = None
+    ) -> list[Span]:
         """
         Log multiple span entities to the tracking store.
 
@@ -793,7 +829,7 @@ class AbstractStore(MCPServerRegistryMixin, GatewayStoreMixin):
         """
         return await asyncio.to_thread(self.log_spans, location, spans)
 
-    def log_metric(self, run_id, metric):
+    def log_metric(self, run_id: str, metric: Metric) -> None:
         """
         Log a metric for the specified run
 
@@ -813,7 +849,7 @@ class AbstractStore(MCPServerRegistryMixin, GatewayStoreMixin):
         """
         return self.log_batch_async(run_id, metrics=[metric], params=[], tags=[])
 
-    def log_param(self, run_id, param):
+    def log_param(self, run_id: str, param: Param) -> None:
         """
         Log a param for the specified run
 
@@ -823,7 +859,7 @@ class AbstractStore(MCPServerRegistryMixin, GatewayStoreMixin):
         """
         self.log_batch(run_id, metrics=[], params=[param], tags=[])
 
-    def log_param_async(self, run_id, param) -> RunOperations:
+    def log_param_async(self, run_id: str, param: Param) -> RunOperations:
         """
         Log a param for the specified run in async fashion.
 
@@ -833,7 +869,7 @@ class AbstractStore(MCPServerRegistryMixin, GatewayStoreMixin):
         """
         return self.log_batch_async(run_id, metrics=[], params=[param], tags=[])
 
-    def set_experiment_tag(self, experiment_id, tag):
+    def set_experiment_tag(self, experiment_id: str, tag: ExperimentTag) -> None:
         """
         Set a tag for the specified experiment
 
@@ -842,7 +878,7 @@ class AbstractStore(MCPServerRegistryMixin, GatewayStoreMixin):
             tag: :py:class:`mlflow.entities.ExperimentTag` instance to set.
         """
 
-    def delete_experiment_tag(self, experiment_id, key):
+    def delete_experiment_tag(self, experiment_id: str, key: str) -> None:
         """
         Delete a tag from the specified experiment
 
@@ -851,7 +887,7 @@ class AbstractStore(MCPServerRegistryMixin, GatewayStoreMixin):
             key: String name of the tag to be deleted.
         """
 
-    def set_tag(self, run_id, tag):
+    def set_tag(self, run_id: str, tag: RunTag) -> None:
         """
         Set a tag for the specified run
 
@@ -861,7 +897,7 @@ class AbstractStore(MCPServerRegistryMixin, GatewayStoreMixin):
         """
         self.log_batch(run_id, metrics=[], params=[], tags=[tag])
 
-    def set_tag_async(self, run_id, tag) -> RunOperations:
+    def set_tag_async(self, run_id: str, tag: RunTag) -> RunOperations:
         """
         Set a tag for the specified run in async fashion.
 
@@ -872,7 +908,13 @@ class AbstractStore(MCPServerRegistryMixin, GatewayStoreMixin):
         return self.log_batch_async(run_id, metrics=[], params=[], tags=[tag])
 
     @abstractmethod
-    def get_metric_history(self, run_id, metric_key, max_results=None, page_token=None):
+    def get_metric_history(
+        self,
+        run_id: str,
+        metric_key: str,
+        max_results: int | None = None,
+        page_token: str | None = None,
+    ) -> list[Metric]:
         """
         Return a list of metric objects corresponding to all values logged for a given metric
         within a run.
@@ -894,7 +936,13 @@ class AbstractStore(MCPServerRegistryMixin, GatewayStoreMixin):
         # argument is not provided, this API will return a full metric history event collection
         # without the paged queries to the backend store.
 
-    def get_metric_history_bulk_interval_from_steps(self, run_id, metric_key, steps, max_results):
+    def get_metric_history_bulk_interval_from_steps(
+        self,
+        run_id: str,
+        metric_key: str,
+        steps: list[int],
+        max_results: int,
+    ) -> list[MetricWithRunId]:
         """
         Return a list of metric objects corresponding to all values logged
         for a given metric within a run for the specified steps.
@@ -994,15 +1042,22 @@ class AbstractStore(MCPServerRegistryMixin, GatewayStoreMixin):
             start_step = 0
             end_step = all_steps[-1] if all_steps else 0
 
+        # Mismatched bounds were rejected above, so both are resolved ints here;
+        # the fallbacks exist only to satisfy the declared Optional types.
+        lower_bound: int = 0 if start_step is None else start_step
+        upper_bound: int = 0 if end_step is None else end_step
+
         # remove any steps outside of the range
-        all_mins_and_maxes = {step for step in all_mins_and_maxes if start_step <= step <= end_step}
+        all_mins_and_maxes = {
+            step for step in all_mins_and_maxes if lower_bound <= step <= upper_bound
+        }
 
         # doing extra iterations here shouldn't badly affect performance,
         # since the number of steps at this point should be relatively small
         # (MAX_RESULTS_PER_RUN + len(all_mins_and_maxes))
 
-        start_idx = bisect.bisect_left(all_steps, start_step)
-        end_idx = bisect.bisect_right(all_steps, end_step)
+        start_idx = bisect.bisect_left(all_steps, lower_bound)
+        end_idx = bisect.bisect_right(all_steps, upper_bound)
         if end_idx - start_idx <= max_results:
             sampled_steps = set(all_steps[start_idx:end_idx])
         else:
@@ -1027,7 +1082,7 @@ class AbstractStore(MCPServerRegistryMixin, GatewayStoreMixin):
         # so steps at the end of the range are not crowded out by steps holding many values.
         per_run_max_results = max(max_results, len(steps))
         step_set = set(steps)
-        metrics_with_run_ids = []
+        metrics_with_run_ids: list[MetricWithRunId] = []
         for run_id in run_ids:
             run_metrics = sorted(
                 (m for m in self.get_metric_history(run_id, metric_key) if m.step in step_set),
@@ -1041,13 +1096,13 @@ class AbstractStore(MCPServerRegistryMixin, GatewayStoreMixin):
 
     def search_runs(
         self,
-        experiment_ids,
-        filter_string,
-        run_view_type,
-        max_results=SEARCH_MAX_RESULTS_DEFAULT,
-        order_by=None,
-        page_token=None,
-    ):
+        experiment_ids: list[str],
+        filter_string: str,
+        run_view_type: int,
+        max_results: int = SEARCH_MAX_RESULTS_DEFAULT,
+        order_by: list[str] | None = None,
+        page_token: str | None = None,
+    ) -> PagedList[Run]:
         """
         Return runs that match the given list of search expressions within the experiments.
 
@@ -1081,13 +1136,13 @@ class AbstractStore(MCPServerRegistryMixin, GatewayStoreMixin):
     @abstractmethod
     def _search_runs(
         self,
-        experiment_ids,
-        filter_string,
-        run_view_type,
-        max_results,
-        order_by,
-        page_token,
-    ):
+        experiment_ids: list[str],
+        filter_string: str,
+        run_view_type: int,
+        max_results: int,
+        order_by: list[str] | None,
+        page_token: str | None,
+    ) -> tuple[list[Run], str | None]:
         """
         Return runs that match the given list of search expressions within the experiments, as
         well as a pagination token (indicating where the next page should start). Subclasses of
@@ -1103,7 +1158,13 @@ class AbstractStore(MCPServerRegistryMixin, GatewayStoreMixin):
         """
 
     @abstractmethod
-    def log_batch(self, run_id, metrics, params, tags):
+    def log_batch(
+        self,
+        run_id: str,
+        metrics: list[Metric],
+        params: list[Param],
+        tags: list[RunTag],
+    ) -> None:
         """
         Log multiple metrics, params, and tags for the specified run
 
@@ -1117,7 +1178,13 @@ class AbstractStore(MCPServerRegistryMixin, GatewayStoreMixin):
             None.
         """
 
-    def log_batch_async(self, run_id, metrics, params, tags) -> RunOperations:
+    def log_batch_async(
+        self,
+        run_id: str,
+        metrics: list[Metric],
+        params: list[Param],
+        tags: list[RunTag],
+    ) -> RunOperations:
         """
         Log multiple metrics, params, and tags for the specified run in async fashion.
         This API does not offer immediate consistency of the data. When API returns,
@@ -1141,7 +1208,7 @@ class AbstractStore(MCPServerRegistryMixin, GatewayStoreMixin):
             run_id=run_id, metrics=metrics, params=params, tags=tags
         )
 
-    def end_async_logging(self):
+    def end_async_logging(self) -> None:
         """
         Ends the async logging queue. This method is a no-op if the queue is not active. This is
         different from flush as it just stops the async logging queue from accepting
@@ -1151,7 +1218,7 @@ class AbstractStore(MCPServerRegistryMixin, GatewayStoreMixin):
         if self._async_logging_queue.is_active():
             self._async_logging_queue.end_async_logging()
 
-    def flush_async_logging(self):
+    def flush_async_logging(self) -> None:
         """
         Flushes the async logging queue. This method is a no-op if the queue is already
         at IDLE state. This methods also shutdown the logging worker threads.
@@ -1160,7 +1227,7 @@ class AbstractStore(MCPServerRegistryMixin, GatewayStoreMixin):
         if not self._async_logging_queue.is_idle():
             self._async_logging_queue.flush()
 
-    def shut_down_async_logging(self):
+    def shut_down_async_logging(self) -> None:
         """
         Shuts down the async logging queue. This method is a no-op if the queue is already
         at IDLE state. This methods also shutdown the logging worker threads.
@@ -1174,7 +1241,7 @@ class AbstractStore(MCPServerRegistryMixin, GatewayStoreMixin):
         run_id: str,
         datasets: list[DatasetInput] | None = None,
         models: list[LoggedModelInput] | None = None,
-    ):
+    ) -> None:
         """
         Log inputs, such as datasets, to the specified run.
 
@@ -1189,7 +1256,7 @@ class AbstractStore(MCPServerRegistryMixin, GatewayStoreMixin):
             None.
         """
 
-    def log_outputs(self, run_id: str, models: list[LoggedModelOutput]):
+    def log_outputs(self, run_id: str, models: list[LoggedModelOutput]) -> None:
         """
         Log outputs, such as models, to the specified run.
 
@@ -1203,7 +1270,7 @@ class AbstractStore(MCPServerRegistryMixin, GatewayStoreMixin):
         """
         raise NotImplementedError(self.__class__.__name__)
 
-    def record_logged_model(self, run_id, mlflow_model):
+    def record_logged_model(self, run_id: str, mlflow_model: "Model") -> None:
         raise NotImplementedError(self.__class__.__name__)
 
     def create_logged_model(
@@ -1351,6 +1418,9 @@ class AbstractStore(MCPServerRegistryMixin, GatewayStoreMixin):
         """
         raise NotImplementedError(self.__class__.__name__)
 
+    # ``requires_sql_backend`` (mlflow/utils/annotations.py) mutates and returns its
+    # callable unannotated, so mypy sees an untyped decorator; each use carries a
+    # targeted ``[misc]`` ignore until that helper is typed with ParamSpec/TypeVar.
     @requires_sql_backend
     def create_dataset(
         self,
@@ -1655,7 +1725,7 @@ class AbstractStore(MCPServerRegistryMixin, GatewayStoreMixin):
         """
         raise NotImplementedError(self.__class__.__name__)
 
-    def list_scorers(self, experiment_id) -> list[ScorerVersion]:
+    def list_scorers(self, experiment_id: str) -> list[ScorerVersion]:
         """
         List all scorers for an experiment.
 
@@ -1680,7 +1750,12 @@ class AbstractStore(MCPServerRegistryMixin, GatewayStoreMixin):
             result.extend(self.list_scorers(exp_id))
         return result
 
-    def get_scorer(self, experiment_id, name, version=None) -> ScorerVersion:
+    def get_scorer(
+        self,
+        experiment_id: str,
+        name: str,
+        version: int | None = None,
+    ) -> ScorerVersion:
         """
         Get a specific scorer for an experiment.
 
@@ -1697,7 +1772,11 @@ class AbstractStore(MCPServerRegistryMixin, GatewayStoreMixin):
         """
         raise NotImplementedError(self.__class__.__name__)
 
-    def list_scorer_versions(self, experiment_id, name) -> list[ScorerVersion]:
+    def list_scorer_versions(
+        self,
+        experiment_id: str,
+        name: str,
+    ) -> list[ScorerVersion]:
         """
         List all versions of a specific scorer for an experiment.
 
@@ -1713,7 +1792,12 @@ class AbstractStore(MCPServerRegistryMixin, GatewayStoreMixin):
         """
         raise NotImplementedError(self.__class__.__name__)
 
-    def delete_scorer(self, experiment_id, name, version=None) -> None:
+    def delete_scorer(
+        self,
+        experiment_id: str,
+        name: str,
+        version: int | None = None,
+    ) -> None:
         """
         Delete all versions of a scorer for an experiment.
 
