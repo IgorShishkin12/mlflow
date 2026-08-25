@@ -1,6 +1,12 @@
 import logging
+from typing import Any
 
-from mlflow.entities.model_registry import ModelVersion, RegisteredModel
+from mlflow.entities.model_registry import (
+    ModelVersion,
+    ModelVersionTag,
+    RegisteredModel,
+    RegisteredModelTag,
+)
 from mlflow.entities.webhook import Webhook, WebhookEvent, WebhookStatus, WebhookTestResult
 from mlflow.protos.model_registry_pb2 import (
     CreateModelVersion,
@@ -63,7 +69,16 @@ class RestStore(WorkspaceRestStoreMixin, BaseRestStore):
             is a function so that we can obtain fresh credentials in the case of expiry.
     """
 
-    def _call_endpoint(self, api, json_body, call_all_endpoints=False, extra_headers=None):
+    # `api` is a generated protobuf request-message class. Its response class is resolved
+    # dynamically via the service descriptor (`method.Response()`), so the request/response
+    # pair has no shared static type to name here.
+    def _call_endpoint(
+        self,
+        api: Any,
+        json_body: str | None,
+        call_all_endpoints: bool = False,
+        extra_headers: dict[str, str] | None = None,
+    ) -> Any:
         self._validate_workspace_support_if_specified()
         return super()._call_endpoint(
             api,
@@ -72,24 +87,27 @@ class RestStore(WorkspaceRestStoreMixin, BaseRestStore):
             extra_headers=extra_headers,
         )
 
-    def _get_response_from_method(self, method):
+    def _get_response_from_method(self, method: Any) -> Any:
         return method.Response()
 
-    def _get_endpoint_from_method(self, method):
-        return _METHOD_TO_INFO[method]
+    def _get_endpoint_from_method(self, method: Any) -> tuple[str, str]:
+        endpoint_info: tuple[str, str] = _METHOD_TO_INFO[method]
+        return endpoint_info
 
-    def _get_all_endpoints_from_method(self, method):
-        return _METHOD_TO_ALL_INFO[method]
+    def _get_all_endpoints_from_method(self, method: Any) -> list[tuple[str, str]]:
+        endpoint_infos: list[tuple[str, str]] = _METHOD_TO_ALL_INFO[method]
+        return endpoint_infos
 
-    def _get_webhook_endpoint_from_method(self, method):
-        return _WEBHOOK_METHOD_TO_INFO[method]
+    def _get_webhook_endpoint_from_method(self, method: Any) -> tuple[str, str]:
+        endpoint_info: tuple[str, str] = _WEBHOOK_METHOD_TO_INFO[method]
+        return endpoint_info
 
     def _call_webhook_endpoint(
         self,
-        api,
+        api: Any,
         json_body: str | None = None,
         webhook_id: str | None = None,
-    ):
+    ) -> Any:
         endpoint, method = self._get_webhook_endpoint_from_method(api)
         if webhook_id:
             endpoint = endpoint.format(webhook_id=webhook_id)
@@ -98,7 +116,13 @@ class RestStore(WorkspaceRestStoreMixin, BaseRestStore):
 
     # CRUD API for RegisteredModel objects
 
-    def create_registered_model(self, name, tags=None, description=None, deployment_job_id=None):
+    def create_registered_model(
+        self,
+        name: str,
+        tags: list[RegisteredModelTag] | None = None,
+        description: str | None = None,
+        deployment_job_id: str | None = None,
+    ) -> RegisteredModel:
         """
         Create a new registered model in backend store.
 
@@ -120,7 +144,9 @@ class RestStore(WorkspaceRestStoreMixin, BaseRestStore):
         response_proto = self._call_endpoint(CreateRegisteredModel, req_body)
         return RegisteredModel.from_proto(response_proto.registered_model)
 
-    def update_registered_model(self, name, description, deployment_job_id=None):
+    def update_registered_model(
+        self, name: str, description: str, deployment_job_id: str | None = None
+    ) -> RegisteredModel:
         """
         Update description of the registered model.
 
@@ -136,7 +162,7 @@ class RestStore(WorkspaceRestStoreMixin, BaseRestStore):
         response_proto = self._call_endpoint(UpdateRegisteredModel, req_body)
         return RegisteredModel.from_proto(response_proto.registered_model)
 
-    def rename_registered_model(self, name, new_name):
+    def rename_registered_model(self, name: str, new_name: str) -> RegisteredModel:
         """
         Rename the registered model.
 
@@ -152,7 +178,7 @@ class RestStore(WorkspaceRestStoreMixin, BaseRestStore):
         response_proto = self._call_endpoint(RenameRegisteredModel, req_body)
         return RegisteredModel.from_proto(response_proto.registered_model)
 
-    def delete_registered_model(self, name):
+    def delete_registered_model(self, name: str) -> None:
         """
         Delete the registered model.
         Backend raises exception if a registered model with given name does not exist.
@@ -167,8 +193,12 @@ class RestStore(WorkspaceRestStoreMixin, BaseRestStore):
         self._call_endpoint(DeleteRegisteredModel, req_body)
 
     def search_registered_models(
-        self, filter_string=None, max_results=None, order_by=None, page_token=None
-    ):
+        self,
+        filter_string: str | None = None,
+        max_results: int | None = None,
+        order_by: list[str] | None = None,
+        page_token: str | None = None,
+    ) -> PagedList[RegisteredModel]:
         """
         Search for registered models in backend that satisfy the filter criteria.
 
@@ -201,7 +231,7 @@ class RestStore(WorkspaceRestStoreMixin, BaseRestStore):
         ]
         return PagedList(registered_models, response_proto.next_page_token)
 
-    def get_registered_model(self, name):
+    def get_registered_model(self, name: str) -> RegisteredModel:
         """
         Get registered model instance by name.
 
@@ -215,7 +245,7 @@ class RestStore(WorkspaceRestStoreMixin, BaseRestStore):
         response_proto = self._call_endpoint(GetRegisteredModel, req_body)
         return RegisteredModel.from_proto(response_proto.registered_model)
 
-    def get_latest_versions(self, name, stages=None):
+    def get_latest_versions(self, name: str, stages: list[str] | None = None) -> list[ModelVersion]:
         """
         Latest version models for each requested stage. If no ``stages`` argument is provided,
         returns the latest version for each stage.
@@ -235,7 +265,7 @@ class RestStore(WorkspaceRestStoreMixin, BaseRestStore):
             for model_version in response_proto.model_versions
         ]
 
-    def set_registered_model_tag(self, name, tag):
+    def set_registered_model_tag(self, name: str, tag: RegisteredModelTag) -> None:
         """
         Set a tag for the registered model.
 
@@ -249,7 +279,7 @@ class RestStore(WorkspaceRestStoreMixin, BaseRestStore):
         req_body = message_to_json(SetRegisteredModelTag(name=name, key=tag.key, value=tag.value))
         self._call_endpoint(SetRegisteredModelTag, req_body)
 
-    def delete_registered_model_tag(self, name, key):
+    def delete_registered_model_tag(self, name: str, key: str) -> None:
         """
         Delete a tag associated with the registered model.
 
@@ -267,15 +297,15 @@ class RestStore(WorkspaceRestStoreMixin, BaseRestStore):
 
     def create_model_version(
         self,
-        name,
-        source,
-        run_id=None,
-        tags=None,
-        run_link=None,
-        description=None,
-        local_model_path=None,
+        name: str,
+        source: str,
+        run_id: str | None = None,
+        tags: list[ModelVersionTag] | None = None,
+        run_link: str | None = None,
+        description: str | None = None,
+        local_model_path: str | None = None,
         model_id: str | None = None,
-    ):
+    ) -> ModelVersion:
         """
         Create a new model version from given source and run ID.
 
@@ -311,7 +341,13 @@ class RestStore(WorkspaceRestStoreMixin, BaseRestStore):
         response_proto = self._call_endpoint(CreateModelVersion, req_body)
         return ModelVersion.from_proto(response_proto.model_version)
 
-    def transition_model_version_stage(self, name, version, stage, archive_existing_versions):
+    def transition_model_version_stage(
+        self,
+        name: str,
+        version: str | int,
+        stage: str,
+        archive_existing_versions: bool,
+    ) -> ModelVersion:
         """
         Update model version stage.
 
@@ -339,7 +375,7 @@ class RestStore(WorkspaceRestStoreMixin, BaseRestStore):
         response_proto = self._call_endpoint(TransitionModelVersionStage, req_body)
         return ModelVersion.from_proto(response_proto.model_version)
 
-    def update_model_version(self, name, version, description):
+    def update_model_version(self, name: str, version: str | int, description: str) -> ModelVersion:
         """
         Update metadata associated with a model version in backend.
 
@@ -358,7 +394,7 @@ class RestStore(WorkspaceRestStoreMixin, BaseRestStore):
         response_proto = self._call_endpoint(UpdateModelVersion, req_body)
         return ModelVersion.from_proto(response_proto.model_version)
 
-    def delete_model_version(self, name, version):
+    def delete_model_version(self, name: str, version: str | int) -> None:
         """
         Delete model version in backend.
 
@@ -372,7 +408,7 @@ class RestStore(WorkspaceRestStoreMixin, BaseRestStore):
         req_body = message_to_json(DeleteModelVersion(name=name, version=str(version)))
         self._call_endpoint(DeleteModelVersion, req_body)
 
-    def get_model_version(self, name, version):
+    def get_model_version(self, name: str, version: str | int) -> ModelVersion:
         """
         Get the model version instance by name and version.
 
@@ -387,7 +423,7 @@ class RestStore(WorkspaceRestStoreMixin, BaseRestStore):
         response_proto = self._call_endpoint(GetModelVersion, req_body)
         return ModelVersion.from_proto(response_proto.model_version)
 
-    def get_model_version_download_uri(self, name, version):
+    def get_model_version_download_uri(self, name: str, version: str | int) -> str:
         """
         Get the download location in Model Registry for this model version.
         NOTE: For first version of Model Registry, since the models are not copied over to another
@@ -402,11 +438,16 @@ class RestStore(WorkspaceRestStoreMixin, BaseRestStore):
         """
         req_body = message_to_json(GetModelVersionDownloadUri(name=name, version=str(version)))
         response_proto = self._call_endpoint(GetModelVersionDownloadUri, req_body)
-        return response_proto.artifact_uri
+        artifact_uri: str = response_proto.artifact_uri
+        return artifact_uri
 
     def search_model_versions(
-        self, filter_string=None, max_results=None, order_by=None, page_token=None
-    ):
+        self,
+        filter_string: str | None = None,
+        max_results: int | None = None,
+        order_by: list[str] | None = None,
+        page_token: str | None = None,
+    ) -> PagedList[ModelVersion]:
         """
         Search for model versions in backend that satisfy the filter criteria.
 
@@ -438,7 +479,7 @@ class RestStore(WorkspaceRestStoreMixin, BaseRestStore):
         model_versions = [ModelVersion.from_proto(mvd) for mvd in response_proto.model_versions]
         return PagedList(model_versions, response_proto.next_page_token)
 
-    def set_model_version_tag(self, name, version, tag):
+    def set_model_version_tag(self, name: str, version: str | int, tag: ModelVersionTag) -> None:
         """
         Set a tag for the model version.
 
@@ -455,7 +496,7 @@ class RestStore(WorkspaceRestStoreMixin, BaseRestStore):
         )
         self._call_endpoint(SetModelVersionTag, req_body)
 
-    def delete_model_version_tag(self, name, version, key):
+    def delete_model_version_tag(self, name: str, version: str | int, key: str) -> None:
         """
         Delete a tag associated with the model version.
 
@@ -470,7 +511,7 @@ class RestStore(WorkspaceRestStoreMixin, BaseRestStore):
         req_body = message_to_json(DeleteModelVersionTag(name=name, version=str(version), key=key))
         self._call_endpoint(DeleteModelVersionTag, req_body)
 
-    def set_registered_model_alias(self, name, alias, version):
+    def set_registered_model_alias(self, name: str, alias: str, version: str | int) -> None:
         """
         Set a registered model alias pointing to a model version.
 
@@ -487,7 +528,7 @@ class RestStore(WorkspaceRestStoreMixin, BaseRestStore):
         )
         self._call_endpoint(SetRegisteredModelAlias, req_body)
 
-    def delete_registered_model_alias(self, name, alias):
+    def delete_registered_model_alias(self, name: str, alias: str) -> None:
         """
         Delete an alias associated with a registered model.
 
@@ -501,7 +542,7 @@ class RestStore(WorkspaceRestStoreMixin, BaseRestStore):
         req_body = message_to_json(DeleteRegisteredModelAlias(name=name, alias=alias))
         self._call_endpoint(DeleteRegisteredModelAlias, req_body)
 
-    def get_model_version_by_alias(self, name, alias):
+    def get_model_version_by_alias(self, name: str, alias: str) -> ModelVersion:
         """
         Get the model version instance by name and alias.
 

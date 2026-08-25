@@ -5,9 +5,10 @@ import logging
 import os
 import re
 import shutil
+from collections.abc import Iterable, Iterator, Mapping
 from contextlib import contextmanager
 from dataclasses import dataclass
-from typing import Any
+from typing import TYPE_CHECKING, Any, NoReturn, cast
 
 import google.protobuf.empty_pb2
 from pydantic import BaseModel
@@ -15,11 +16,14 @@ from pydantic import BaseModel
 import mlflow
 from mlflow.entities import Run
 from mlflow.entities.logged_model import LoggedModel
+from mlflow.entities.model_registry import ModelVersion, RegisteredModel
+from mlflow.entities.model_registry.model_version_tag import ModelVersionTag
 from mlflow.entities.model_registry.prompt import Prompt
 from mlflow.entities.model_registry.prompt_version import (
     PromptModelConfig,
     PromptVersion,
 )
+from mlflow.entities.model_registry.registered_model_tag import RegisteredModelTag
 from mlflow.exceptions import MlflowException, RestException
 from mlflow.prompt.constants import (
     PROMPT_MODEL_CONFIG_TAG_KEY,
@@ -50,6 +54,7 @@ from mlflow.protos.databricks_uc_registry_messages_pb2 import (
     DeleteRegisteredModelResponse,
     DeleteRegisteredModelTagRequest,
     DeleteRegisteredModelTagResponse,
+    Dependency,
     Entity,
     FinalizeModelVersionRequest,
     FinalizeModelVersionResponse,
@@ -131,6 +136,7 @@ from mlflow.store._unity_catalog.registry.utils import (
     proto_info_to_mlflow_prompt_info,
     proto_to_mlflow_prompt,
 )
+from mlflow.store.artifact.artifact_repo import ArtifactRepository
 from mlflow.store.artifact.databricks_sdk_models_artifact_repo import (
     DatabricksSDKModelsArtifactRepository,
 )
@@ -138,7 +144,7 @@ from mlflow.store.artifact.presigned_url_artifact_repo import (
     PresignedUrlArtifactRepository,
 )
 from mlflow.store.entities.paged_list import PagedList
-from mlflow.store.model_registry.rest_store import BaseRestStore
+from mlflow.store.model_registry.base_rest_store import BaseRestStore
 from mlflow.utils._spark_utils import _get_active_spark_session
 from mlflow.utils._unity_catalog_utils import (
     get_artifact_repo_from_storage_info,
@@ -154,7 +160,6 @@ from mlflow.utils._unity_catalog_utils import (
 from mlflow.utils.databricks_utils import (
     _print_databricks_deployment_job_url,
     get_databricks_host_creds,
-    is_databricks_uri,
 )
 from mlflow.utils.mlflow_tags import (
     MLFLOW_DATABRICKS_JOB_ID,
@@ -170,14 +175,19 @@ from mlflow.utils.rest_utils import (
     http_request,
     verify_rest_response,
 )
-from mlflow.utils.uri import is_fuse_or_uc_volumes_uri
+from mlflow.utils.uri import is_databricks_uri, is_fuse_or_uc_volumes_uri
 
-_TRACKING_METHOD_TO_INFO = extract_api_info_for_service(MlflowService, _REST_API_PATH_PREFIX)
-_METHOD_TO_INFO = {
+if TYPE_CHECKING:
+    from mlflow.models.model import Model
+
+_TRACKING_METHOD_TO_INFO: dict[type[Any], tuple[str, str]] = extract_api_info_for_service(
+    MlflowService, _REST_API_PATH_PREFIX
+)
+_METHOD_TO_INFO: dict[type[Any], tuple[str, str]] = {
     **extract_api_info_for_service(UcModelRegistryService, _REST_API_PATH_PREFIX),
     **extract_api_info_for_service(UnityCatalogPromptService, _REST_API_PATH_PREFIX),
 }
-_METHOD_TO_ALL_INFO = {
+_METHOD_TO_ALL_INFO: dict[type[Any], list[tuple[str, str]]] = {
     **extract_all_api_info_for_service(UcModelRegistryService, _REST_API_PATH_PREFIX),
     **extract_all_api_info_for_service(UnityCatalogPromptService, _REST_API_PATH_PREFIX),
 }
@@ -208,13 +218,18 @@ class _CatalogSchemaFilter:
     remaining_filter: str | None
 
 
-def _require_arg_unspecified(arg_name, arg_value, default_values=None, message=None):
+def _require_arg_unspecified(
+    arg_name: str,
+    arg_value: Any,
+    default_values: list[Any] | None = None,
+    message: str | None = None,
+) -> None:
     default_values = [None] if default_values is None else default_values
     if arg_value not in default_values:
         _raise_unsupported_arg(arg_name, message)
 
 
-def _raise_unsupported_arg(arg_name, message=None):
+def _raise_unsupported_arg(arg_name: str, message: str | None = None) -> NoReturn:
     messages = [
         f"Argument '{arg_name}' is unsupported for models in the Unity Catalog.",
     ]
@@ -223,7 +238,7 @@ def _raise_unsupported_arg(arg_name, message=None):
     raise MlflowException(" ".join(messages))
 
 
-def _raise_unsupported_method(method, message=None):
+def _raise_unsupported_method(method: str, message: str | None = None) -> NoReturn:
     messages = [
         f"Method '{method}' is unsupported for models in the Unity Catalog.",
     ]
@@ -232,7 +247,7 @@ def _raise_unsupported_method(method, message=None):
     raise MlflowException(" ".join(messages))
 
 
-def _load_model(local_model_dir):
+def _load_model(local_model_dir: str) -> "Model":
     # Import Model here instead of in the top level, to avoid circular import; the
     # mlflow.models.model module imports from MLflow tracking, which triggers an import of
     # this file during store registry initialization
@@ -250,7 +265,7 @@ def _load_model(local_model_dir):
         ) from e
 
 
-def get_feature_dependencies(model_dir):
+def get_feature_dependencies(model_dir: str) -> str:
     """
     Gets the features which a model depends on. This functionality is only implemented on
     Databricks. In OSS mlflow, the dependencies are always empty ("").
@@ -267,7 +282,7 @@ def get_feature_dependencies(model_dir):
     return ""
 
 
-def get_model_version_dependencies(model_dir):
+def get_model_version_dependencies(model_dir: str) -> list[dict[str, str]]:
     """
     Gets the specified dependencies for a particular model version and formats them
     to be passed into CreateModelVersion.
@@ -275,7 +290,7 @@ def get_model_version_dependencies(model_dir):
     from mlflow.models.resources import ResourceType
 
     model = _load_model(model_dir)
-    dependencies = []
+    dependencies: list[dict[str, str]] = []
 
     # Try to get model.auth_policy.system_auth_policy.resources. If that is not found or empty,
     # then use model.resources.
@@ -353,9 +368,11 @@ def get_model_version_dependencies(model_dir):
     return dependencies
 
 
-def _fetch_langchain_dependency_from_model_resources(databricks_dependencies, key, resource_type):
+def _fetch_langchain_dependency_from_model_resources(
+    databricks_dependencies: dict[str, Any], key: str, resource_type: str
+) -> list[dict[str, str]]:
     dependencies = databricks_dependencies.get(key, [])
-    deps = []
+    deps: list[dict[str, str]] = []
     for dependency in dependencies:
         if dependency.get("on_behalf_of_user", False):
             continue
@@ -363,8 +380,11 @@ def _fetch_langchain_dependency_from_model_resources(databricks_dependencies, ke
     return deps
 
 
-def _fetch_langchain_dependency_from_model_info(databricks_dependencies, key):
-    return databricks_dependencies.get(key, [])
+def _fetch_langchain_dependency_from_model_info(
+    databricks_dependencies: dict[str, Any], key: str
+) -> list[Any]:
+    dependencies: list[Any] = databricks_dependencies.get(key, [])
+    return dependencies
 
 
 class UcModelRegistryStore(BaseRestStore):
@@ -378,7 +398,7 @@ class UcModelRegistryStore(BaseRestStore):
             versions from source artifacts logged to an MLflow run.
     """
 
-    def __init__(self, store_uri, tracking_uri):
+    def __init__(self, store_uri: str, tracking_uri: str) -> None:
         super().__init__(get_host_creds=functools.partial(get_databricks_host_creds, store_uri))
         self.store_uri = store_uri
         self.tracking_uri = tracking_uri
@@ -388,7 +408,7 @@ class UcModelRegistryStore(BaseRestStore):
         except Exception:
             pass
 
-    def _get_response_from_method(self, method):
+    def _get_response_from_method(self, method: type[Any]) -> Any:
         method_to_response = {
             CreateRegisteredModelRequest: CreateRegisteredModelResponse,
             UpdateRegisteredModelRequest: UpdateRegisteredModelResponse,
@@ -436,15 +456,21 @@ class UcModelRegistryStore(BaseRestStore):
         }
         return method_to_response[method]()
 
-    def _get_endpoint_from_method(self, method):
+    def _get_endpoint_from_method(self, method: type[Any]) -> tuple[str, str]:
         return _METHOD_TO_INFO[method]
 
-    def _get_all_endpoints_from_method(self, method):
+    def _get_all_endpoints_from_method(self, method: type[Any]) -> list[tuple[str, str]]:
         return _METHOD_TO_ALL_INFO[method]
 
     # CRUD API for RegisteredModel objects
 
-    def create_registered_model(self, name, tags=None, description=None, deployment_job_id=None):
+    def create_registered_model(
+        self,
+        name: str,
+        tags: list[RegisteredModelTag] | None = None,
+        description: str | None = None,
+        deployment_job_id: str | None = None,
+    ) -> RegisteredModel:
         """
         Create a new registered model in backend store.
 
@@ -473,7 +499,7 @@ class UcModelRegistryStore(BaseRestStore):
             response_proto = self._call_endpoint(CreateRegisteredModelRequest, req_body)
         except RestException as e:
 
-            def reraise_with_legacy_hint(exception, legacy_hint):
+            def reraise_with_legacy_hint(exception: RestException, legacy_hint: str) -> NoReturn:
                 new_message = exception.message.rstrip(".") + f". {legacy_hint}"
                 raise MlflowException(
                     message=new_message,
@@ -510,7 +536,12 @@ class UcModelRegistryStore(BaseRestStore):
             )
         return registered_model_from_uc_proto(response_proto.registered_model)
 
-    def update_registered_model(self, name, description=None, deployment_job_id=None):
+    def update_registered_model(
+        self,
+        name: str,
+        description: str | None = None,
+        deployment_job_id: str | None = None,
+    ) -> RegisteredModel:
         """
         Update description of the registered model.
 
@@ -538,7 +569,7 @@ class UcModelRegistryStore(BaseRestStore):
             )
         return registered_model_from_uc_proto(response_proto.registered_model)
 
-    def rename_registered_model(self, name, new_name):
+    def rename_registered_model(self, name: str, new_name: str) -> RegisteredModel:
         """
         Rename the registered model.
 
@@ -554,7 +585,7 @@ class UcModelRegistryStore(BaseRestStore):
         response_proto = self._call_endpoint(UpdateRegisteredModelRequest, req_body)
         return registered_model_from_uc_proto(response_proto.registered_model)
 
-    def delete_registered_model(self, name):
+    def delete_registered_model(self, name: str) -> None:
         """
         Delete the registered model.
         Backend raises exception if a registered model with given name does not exist.
@@ -570,8 +601,12 @@ class UcModelRegistryStore(BaseRestStore):
         self._call_endpoint(DeleteRegisteredModelRequest, req_body)
 
     def search_registered_models(
-        self, filter_string=None, max_results=None, order_by=None, page_token=None
-    ):
+        self,
+        filter_string: str | None = None,
+        max_results: int | None = None,
+        order_by: list[str] | None = None,
+        page_token: str | None = None,
+    ) -> PagedList[RegisteredModel]:
         """
         Search for registered models in backend that satisfy the filter criteria.
 
@@ -598,13 +633,13 @@ class UcModelRegistryStore(BaseRestStore):
             )
         )
         response_proto = self._call_endpoint(SearchRegisteredModelsRequest, req_body)
-        registered_models = [
+        registered_models: list[RegisteredModel] = [
             registered_model_search_from_uc_proto(registered_model)
             for registered_model in response_proto.registered_models
         ]
         return PagedList(registered_models, response_proto.next_page_token)
 
-    def get_registered_model(self, name):
+    def get_registered_model(self, name: str) -> RegisteredModel:
         """
         Get registered model instance by name.
 
@@ -619,7 +654,7 @@ class UcModelRegistryStore(BaseRestStore):
         response_proto = self._call_endpoint(GetRegisteredModelRequest, req_body)
         return registered_model_from_uc_proto(response_proto.registered_model)
 
-    def get_latest_versions(self, name, stages=None):
+    def get_latest_versions(self, name: str, stages: list[str] | None = None) -> list[ModelVersion]:
         """
         Latest version models for each requested stage. If no ``stages`` argument is provided,
         returns the latest version for each stage.
@@ -658,7 +693,7 @@ class UcModelRegistryStore(BaseRestStore):
             message=message,
         )
 
-    def set_registered_model_tag(self, name, tag):
+    def set_registered_model_tag(self, name: str, tag: RegisteredModelTag) -> None:
         """
         Set a tag for the registered model.
 
@@ -675,7 +710,7 @@ class UcModelRegistryStore(BaseRestStore):
         )
         self._call_endpoint(SetRegisteredModelTagRequest, req_body)
 
-    def delete_registered_model_tag(self, name, key):
+    def delete_registered_model_tag(self, name: str, key: str) -> None:
         """
         Delete a tag associated with the registered model.
 
@@ -691,7 +726,7 @@ class UcModelRegistryStore(BaseRestStore):
         self._call_endpoint(DeleteRegisteredModelTagRequest, req_body)
 
     # CRUD API for ModelVersion objects
-    def _finalize_model_version(self, name, version):
+    def _finalize_model_version(self, name: str, version: str) -> Any:
         """
         Finalize a UC model version after its files have been written to managed storage,
         updating its status from PENDING_REGISTRATION to READY
@@ -706,7 +741,9 @@ class UcModelRegistryStore(BaseRestStore):
         req_body = message_to_json(FinalizeModelVersionRequest(name=name, version=version))
         return self._call_endpoint(FinalizeModelVersionRequest, req_body).model_version
 
-    def _get_temporary_model_version_write_credentials(self, name, version) -> TemporaryCredentials:
+    def _get_temporary_model_version_write_credentials(
+        self, name: str, version: str
+    ) -> TemporaryCredentials:
         """
         Get temporary credentials for uploading model version files
 
@@ -723,11 +760,15 @@ class UcModelRegistryStore(BaseRestStore):
                 name=name, version=version, operation=MODEL_VERSION_OPERATION_READ_WRITE
             )
         )
-        return self._call_endpoint(
+        response_proto = self._call_endpoint(
             GenerateTemporaryModelVersionCredentialsRequest, req_body
-        ).credentials
+        )
+        credentials: TemporaryCredentials = response_proto.credentials
+        return credentials
 
-    def _get_run_and_headers(self, run_id):
+    def _get_run_and_headers(
+        self, run_id: str | None
+    ) -> tuple[Mapping[str, str] | None, Run | None]:
         if run_id is None or not is_databricks_uri(self.tracking_uri):
             return None, None
         host_creds = self.get_tracking_host_creds()
@@ -747,14 +788,14 @@ class UcModelRegistryStore(BaseRestStore):
                 "current user. No run link will be recorded for the model version."
             )
             return None, None
-        headers = response.headers
+        headers: Mapping[str, str] | None = response.headers
         js_dict = response.json()
         parsed_response = GetRun.Response()
         parse_dict(js_dict=js_dict, message=parsed_response)
         run = Run.from_proto(parsed_response.run)
         return headers, run
 
-    def _get_workspace_id(self, headers):
+    def _get_workspace_id(self, headers: Mapping[str, str] | None) -> str | None:
         if headers is None or _DATABRICKS_ORG_ID_HEADER not in headers:
             _logger.warning(
                 "Unable to get model version source run's workspace ID from request headers. "
@@ -763,27 +804,27 @@ class UcModelRegistryStore(BaseRestStore):
             return None
         return headers[_DATABRICKS_ORG_ID_HEADER]
 
-    def _get_notebook_id(self, run):
+    def _get_notebook_id(self, run: Run | None) -> str | None:
         if run is None:
             return None
         return run.data.tags.get(MLFLOW_DATABRICKS_NOTEBOOK_ID, None)
 
-    def _get_job_id(self, run):
+    def _get_job_id(self, run: Run | None) -> str | None:
         if run is None:
             return None
         return run.data.tags.get(MLFLOW_DATABRICKS_JOB_ID, None)
 
-    def _get_job_run_id(self, run):
+    def _get_job_run_id(self, run: Run | None) -> str | None:
         if run is None:
             return None
         return run.data.tags.get(MLFLOW_DATABRICKS_JOB_RUN_ID, None)
 
-    def _get_lineage_input_sources(self, run):
+    def _get_lineage_input_sources(self, run: Run | None) -> list[Securable] | None:
         from mlflow.data.delta_dataset_source import DeltaDatasetSource
 
         if run is None:
             return None
-        securable_list = []
+        securable_list: list[Securable] = []
         if run.inputs is not None:
             for dataset in run.inputs.dataset_inputs:
                 dataset_source = mlflow.data.get_source(dataset)
@@ -808,7 +849,7 @@ class UcModelRegistryStore(BaseRestStore):
         else:
             return None
 
-    def _validate_model_signature(self, local_model_path):
+    def _validate_model_signature(self, local_model_path: str) -> None:
         # Import Model here instead of in the top level, to avoid circular import; the
         # mlflow.models.model module imports from MLflow tracking, which triggers an import of
         # this file during store registry initialization
@@ -831,7 +872,7 @@ class UcModelRegistryStore(BaseRestStore):
                 f"{signature_required_explanation}"
             )
 
-    def _download_model_weights_if_not_saved(self, local_model_path):
+    def _download_model_weights_if_not_saved(self, local_model_path: str) -> None:
         """
         Transformers models can be saved without the base model weights by setting
         `save_pretrained=False` when saving or logging the model. Such 'weight-less'
@@ -872,7 +913,7 @@ class UcModelRegistryStore(BaseRestStore):
             ) from e
 
     @contextmanager
-    def _local_model_dir(self, source, local_model_path):
+    def _local_model_dir(self, source: str, local_model_path: str | None) -> Iterator[str]:
         if local_model_path is not None:
             yield local_model_path
         else:
@@ -900,7 +941,7 @@ class UcModelRegistryStore(BaseRestStore):
                 if not os.path.exists(source) and not is_fuse_or_uc_volumes_uri(local_model_dir):
                     shutil.rmtree(local_model_dir)
 
-    def _get_logged_model_from_model_id(self, model_id) -> LoggedModel | None:
+    def _get_logged_model_from_model_id(self, model_id: str | None) -> LoggedModel | None:
         if model_id is None:
             return None
         try:
@@ -918,17 +959,17 @@ class UcModelRegistryStore(BaseRestStore):
 
     def _create_model_version_with_optional_signature_validation(
         self,
-        name,
-        source,
-        run_id=None,
-        tags=None,
-        run_link=None,
-        description=None,
-        local_model_path=None,
+        name: str,
+        source: str,
+        run_id: str | None = None,
+        tags: list[ModelVersionTag] | None = None,
+        run_link: str | None = None,
+        description: str | None = None,
+        local_model_path: str | None = None,
         model_id: str | None = None,
         bypass_signature_validation: bool = False,
         source_workspace_id: str | None = None,
-    ):
+    ) -> ModelVersion:
         """
         Private method to create a new model version from given source and run ID, with optional
         bypass of signature validation. This bypass is currently only used by the
@@ -976,11 +1017,11 @@ class UcModelRegistryStore(BaseRestStore):
             source_workspace_id = self._get_workspace_id(headers)
         notebook_id = self._get_notebook_id(run)
         job_id = self._get_job_id(run)
-        extra_headers = None
+        extra_headers: dict[str, Any] | None = None
         if notebook_id is not None or job_id is not None:
             lineage_securable_list = self._get_lineage_input_sources(run)
-            entity_list = []
-            lineage_list = None
+            entity_list: list[Entity] = []
+            lineage_list: list[Lineage] | None = None
             if notebook_id is not None:
                 notebook_entity = Notebook(id=str(notebook_id))
                 entity_list.append(Entity(notebook=notebook_entity))
@@ -1022,18 +1063,18 @@ class UcModelRegistryStore(BaseRestStore):
     def _create_and_finalize_model_version(
         self,
         *,
-        full_name,
-        source,
-        description,
-        run_id,
-        tags,
-        feature_deps,
-        other_model_deps,
-        model_id,
-        source_workspace_id,
-        extra_headers,
-        local_model_dir,
-    ):
+        full_name: str,
+        source: str,
+        description: str | None,
+        run_id: str | None,
+        tags: list[ModelVersionTag] | None,
+        feature_deps: str,
+        other_model_deps: list[dict[str, str]],
+        model_id: str | None,
+        source_workspace_id: str | None,
+        extra_headers: dict[str, Any] | None,
+        local_model_dir: str,
+    ) -> ModelVersion:
         """Create a model version on the backend, upload its files, and finalize it.
 
         Isolated as an overridable seam so backend-specific stores (e.g. the native UC store) can
@@ -1050,7 +1091,10 @@ class UcModelRegistryStore(BaseRestStore):
                 tags=uc_model_version_tag_from_mlflow_tags(tags),
                 run_tracking_server_id=source_workspace_id,
                 feature_deps=feature_deps,
-                model_version_dependencies=other_model_deps,
+                # The protobuf constructor accepts field-name-keyed dicts for repeated message
+                # fields (each dict is merged into a `Dependency`), so the dict list is valid
+                # at runtime even though the stub declares the parameter as message objects.
+                model_version_dependencies=cast(Iterable[Dependency], other_model_deps),
                 model_id=model_id,
             )
         )
@@ -1065,15 +1109,15 @@ class UcModelRegistryStore(BaseRestStore):
 
     def create_model_version(
         self,
-        name,
-        source,
-        run_id=None,
-        tags=None,
-        run_link=None,
-        description=None,
-        local_model_path=None,
+        name: str,
+        source: str,
+        run_id: str | None = None,
+        tags: list[ModelVersionTag] | None = None,
+        run_link: str | None = None,
+        description: str | None = None,
+        local_model_path: str | None = None,
         model_id: str | None = None,
-    ):
+    ) -> ModelVersion:
         """
         Create a new model version from given source and run ID.
 
@@ -1109,14 +1153,19 @@ class UcModelRegistryStore(BaseRestStore):
             bypass_signature_validation=False,
         )
 
-    def _get_artifact_repo(self, model_version, model_name=None, storage_location=None):
+    def _get_artifact_repo(
+        self,
+        model_version: Any,
+        model_name: str | None = None,
+        storage_location: str | None = None,
+    ) -> ArtifactRepository:
         # The native model-version proto has no `name` field, so the caller supplies the full
         # catalog.schema.model name via `model_name`; fall back to `model_version.name` for the
         # legacy proto, which carries it directly.
         version = model_version.version
         credential_name = model_name if model_name is not None else model_version.name
 
-        def base_credential_refresh_def():
+        def base_credential_refresh_def() -> TemporaryCredentials:
             return self._get_temporary_model_version_write_credentials(
                 name=credential_name, version=version
             )
@@ -1126,7 +1175,7 @@ class UcModelRegistryStore(BaseRestStore):
                 credential_name, version, registry_uri=self.store_uri
             )
 
-        resolved_storage_location = (
+        resolved_storage_location: str | None = (
             storage_location
             if storage_location is not None
             else getattr(model_version, "storage_location", None)
@@ -1141,7 +1190,9 @@ class UcModelRegistryStore(BaseRestStore):
             base_credential_refresh_def=base_credential_refresh_def,
         )
 
-    def transition_model_version_stage(self, name, version, stage, archive_existing_versions):
+    def transition_model_version_stage(
+        self, name: str, version: str | int, stage: str, archive_existing_versions: bool
+    ) -> ModelVersion:
         """
         Update model version stage.
 
@@ -1163,7 +1214,7 @@ class UcModelRegistryStore(BaseRestStore):
             "`mlflow.pyfunc.load_model('models:/your_model_name@your_alias')`.",
         )
 
-    def update_model_version(self, name, version, description):
+    def update_model_version(self, name: str, version: str | int, description: str) -> ModelVersion:
         """
         Update metadata associated with a model version in backend.
 
@@ -1183,7 +1234,7 @@ class UcModelRegistryStore(BaseRestStore):
         response_proto = self._call_endpoint(UpdateModelVersionRequest, req_body)
         return model_version_from_uc_proto(response_proto.model_version)
 
-    def delete_model_version(self, name, version):
+    def delete_model_version(self, name: str, version: str | int) -> None:
         """
         Delete model version in backend.
 
@@ -1198,7 +1249,7 @@ class UcModelRegistryStore(BaseRestStore):
         req_body = message_to_json(DeleteModelVersionRequest(name=full_name, version=str(version)))
         self._call_endpoint(DeleteModelVersionRequest, req_body)
 
-    def get_model_version(self, name, version):
+    def get_model_version(self, name: str, version: str | int) -> ModelVersion:
         """
         Get the model version instance by name and version.
 
@@ -1214,7 +1265,7 @@ class UcModelRegistryStore(BaseRestStore):
         response_proto = self._call_endpoint(GetModelVersionRequest, req_body)
         return model_version_from_uc_proto(response_proto.model_version)
 
-    def get_model_version_download_uri(self, name, version):
+    def get_model_version_download_uri(self, name: str, version: str | int) -> str:
         """
         Get the download location in Model Registry for this model version.
         NOTE: For first version of Model Registry, since the models are not copied over to another
@@ -1232,11 +1283,16 @@ class UcModelRegistryStore(BaseRestStore):
             GetModelVersionDownloadUriRequest(name=full_name, version=str(version))
         )
         response_proto = self._call_endpoint(GetModelVersionDownloadUriRequest, req_body)
-        return response_proto.artifact_uri
+        artifact_uri: str = response_proto.artifact_uri
+        return artifact_uri
 
     def search_model_versions(
-        self, filter_string=None, max_results=None, order_by=None, page_token=None
-    ):
+        self,
+        filter_string: str | None = None,
+        max_results: int | None = None,
+        order_by: list[str] | None = None,
+        page_token: str | None = None,
+    ) -> PagedList[ModelVersion]:
         """
         Search for model versions in backend that satisfy the filter criteria.
 
@@ -1263,12 +1319,12 @@ class UcModelRegistryStore(BaseRestStore):
             )
         )
         response_proto = self._call_endpoint(SearchModelVersionsRequest, req_body)
-        model_versions = [
+        model_versions: list[ModelVersion] = [
             model_version_search_from_uc_proto(mvd) for mvd in response_proto.model_versions
         ]
         return PagedList(model_versions, response_proto.next_page_token)
 
-    def set_model_version_tag(self, name, version, tag):
+    def set_model_version_tag(self, name: str, version: str | int, tag: ModelVersionTag) -> None:
         """
         Set a tag for the model version.
 
@@ -1285,7 +1341,7 @@ class UcModelRegistryStore(BaseRestStore):
         )
         self._call_endpoint(SetModelVersionTagRequest, req_body)
 
-    def delete_model_version_tag(self, name, version, key):
+    def delete_model_version_tag(self, name: str, version: str | int, key: str) -> None:
         """
         Delete a tag associated with the model version.
 
@@ -1300,7 +1356,7 @@ class UcModelRegistryStore(BaseRestStore):
         )
         self._call_endpoint(DeleteModelVersionTagRequest, req_body)
 
-    def set_registered_model_alias(self, name, alias, version):
+    def set_registered_model_alias(self, name: str, alias: str, version: str | int) -> None:
         """
         Set a registered model alias pointing to a model version.
 
@@ -1318,7 +1374,7 @@ class UcModelRegistryStore(BaseRestStore):
         )
         self._call_endpoint(SetRegisteredModelAliasRequest, req_body)
 
-    def delete_registered_model_alias(self, name, alias):
+    def delete_registered_model_alias(self, name: str, alias: str) -> None:
         """
         Delete an alias associated with a registered model.
 
@@ -1333,7 +1389,7 @@ class UcModelRegistryStore(BaseRestStore):
         req_body = message_to_json(DeleteRegisteredModelAliasRequest(name=full_name, alias=alias))
         self._call_endpoint(DeleteRegisteredModelAliasRequest, req_body)
 
-    def get_model_version_by_alias(self, name, alias):
+    def get_model_version_by_alias(self, name: str, alias: str) -> ModelVersion:
         """
         Get the model version instance by name and alias.
 
@@ -1349,7 +1405,7 @@ class UcModelRegistryStore(BaseRestStore):
         response_proto = self._call_endpoint(GetModelVersionByAliasRequest, req_body)
         return model_version_from_uc_proto(response_proto.model_version)
 
-    def _await_model_version_creation(self, mv, await_creation_for):
+    def _await_model_version_creation(self, mv: ModelVersion, await_creation_for: int) -> None:
         """
         Does not wait for the model version to become READY as a successful creation will
         immediately place the model version in a READY state.
@@ -1561,7 +1617,7 @@ class UcModelRegistryStore(BaseRestStore):
         description: str | None = None,
         tags: dict[str, str] | None = None,
         response_format: type[BaseModel] | dict[str, Any] | None = None,
-        model_config: "PromptModelConfig | dict[str, Any] | None" = None,
+        model_config: PromptModelConfig | dict[str, Any] | None = None,
     ) -> PromptVersion:
         """
         Create a new prompt version in Unity Catalog.
@@ -1675,13 +1731,15 @@ class UcModelRegistryStore(BaseRestStore):
             SearchPromptVersionsRequest(name=name, max_results=max_results, page_token=page_token)
         )
         endpoint, method = self._get_endpoint_from_method(SearchPromptVersionsRequest)
-        return self._edit_endpoint_and_call(
+        response_proto = self._edit_endpoint_and_call(
             endpoint=endpoint,
             method=method,
             req_body=req_body,
             name=name,
             proto_name=SearchPromptVersionsRequest,
         )
+        search_response: SearchPromptVersionsResponse = response_proto
+        return search_response
 
     def set_prompt_version_tag(self, name: str, version: str | int, key: str, value: str) -> None:
         """
@@ -1873,8 +1931,14 @@ class UcModelRegistryStore(BaseRestStore):
             _logger.debug("Failed to link prompt version to run in unity catalog", exc_info=True)
 
     def _edit_endpoint_and_call(
-        self, endpoint, method, req_body, proto_name, extra_headers=None, **kwargs
-    ):
+        self,
+        endpoint: str,
+        method: str,
+        req_body: str,
+        proto_name: type[Any],
+        extra_headers: dict[str, Any] | None = None,
+        **kwargs: str | int,
+    ) -> Any:
         """
         Edit endpoint URL with parameters and make the call.
 

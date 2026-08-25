@@ -2,12 +2,22 @@ import logging
 import threading
 import urllib
 import uuid
-from typing import Any
+from collections.abc import Callable, Sequence
+from contextlib import AbstractContextManager
+from typing import Any, cast
 
 import sqlalchemy
 from sqlalchemy import select
-from sqlalchemy.orm import Session
+from sqlalchemy.orm import Query, Session
+from sqlalchemy.sql.elements import ColumnElement
+from sqlalchemy.sql.selectable import Select
 
+from mlflow.entities.model_registry import (
+    ModelVersion,
+    ModelVersionTag,
+    RegisteredModel,
+    RegisteredModelTag,
+)
 from mlflow.entities.model_registry.model_version_stages import (
     ALL_STAGES,
     DEFAULT_STAGES_FOR_GET_LATEST_VERSIONS,
@@ -15,9 +25,9 @@ from mlflow.entities.model_registry.model_version_stages import (
     STAGE_DELETED_INTERNAL,
     get_canonical_stage,
 )
-from mlflow.entities.model_registry.prompt_version import IS_PROMPT_TAG_KEY
 from mlflow.entities.webhook import Webhook, WebhookEvent, WebhookStatus
 from mlflow.exceptions import MlflowException
+from mlflow.prompt.constants import IS_PROMPT_TAG_KEY
 from mlflow.prompt.registry_utils import handle_resource_already_exist_error, has_prompt_tag
 from mlflow.protos.databricks_pb2 import (
     INVALID_PARAMETER_VALUE,
@@ -124,7 +134,7 @@ class SqlAlchemyStore(AbstractStore):
                     cls._engine_map[db_uri] = create_sqlalchemy_engine_with_retry(db_uri)
         return cls._engine_map[db_uri]
 
-    def __init__(self, db_uri, read_db_uri=None):
+    def __init__(self, db_uri: str, read_db_uri: str | None = None) -> None:
         """
         Create a database backed store.
 
@@ -141,7 +151,7 @@ class SqlAlchemyStore(AbstractStore):
         super().__init__()
         self.db_uri = db_uri
         self.db_type = extract_db_type_from_uri(db_uri)
-        self.engine = self._get_or_create_engine(db_uri)
+        self.engine: sqlalchemy.engine.Engine = self._get_or_create_engine(db_uri)
         if not _all_tables_exist(self.engine):
             _initialize_tables(self.engine)
         # Verify that all model registry tables exist.
@@ -149,11 +159,13 @@ class SqlAlchemyStore(AbstractStore):
 
         # Set up read replica engine if provided
         if read_db_uri and read_db_uri != db_uri:
-            self.read_engine = self._get_or_create_engine(read_db_uri)
+            self.read_engine: sqlalchemy.engine.Engine | None = self._get_or_create_engine(
+                read_db_uri
+            )
             WriteSessionMaker = sqlalchemy.orm.sessionmaker(bind=self.engine)
             ReadSessionMaker = sqlalchemy.orm.sessionmaker(bind=self.read_engine)
-            self.ManagedSessionMaker = _get_routing_session_maker(
-                WriteSessionMaker, ReadSessionMaker, self.db_type
+            self.ManagedSessionMaker: Callable[..., AbstractContextManager[Session]] = (
+                _get_routing_session_maker(WriteSessionMaker, ReadSessionMaker, self.db_type)
             )
         else:
             if read_db_uri and read_db_uri == db_uri:
@@ -184,7 +196,7 @@ class SqlAlchemyStore(AbstractStore):
         """
         return DEFAULT_WORKSPACE_NAME
 
-    def _get_query(self, session, model):
+    def _get_query(self, session: Session, model: type[Any]) -> Query[Any]:
         """
         Return a query for ``model``.
         Always filter on workspace for relevant models, to benefit from DB index.
@@ -194,7 +206,7 @@ class SqlAlchemyStore(AbstractStore):
             query = query.filter(model.workspace == self._get_active_workspace())
         return query
 
-    def _with_workspace_field(self, instance):
+    def _with_workspace_field(self, instance: Any) -> Any:
         """
         Allow subclasses to populate model fields (e.g., workspace metadata) on ORM instances.
         """
@@ -202,7 +214,7 @@ class SqlAlchemyStore(AbstractStore):
             instance.workspace = DEFAULT_WORKSPACE_NAME
         return instance
 
-    def _initialize_store_state(self):
+    def _initialize_store_state(self) -> None:
         """
         Initialize store state after construction.
 
@@ -219,11 +231,14 @@ class SqlAlchemyStore(AbstractStore):
             )
 
             if exists_non_default_rm:
-                name, workspace = (
-                    session
-                    .query(SqlRegisteredModel.name, SqlRegisteredModel.workspace)
-                    .filter(SqlRegisteredModel.workspace != DEFAULT_WORKSPACE_NAME)
-                    .first()
+                name, workspace = cast(
+                    "tuple[str, str]",
+                    (
+                        session
+                        .query(SqlRegisteredModel.name, SqlRegisteredModel.workspace)
+                        .filter(SqlRegisteredModel.workspace != DEFAULT_WORKSPACE_NAME)
+                        .first()
+                    ),
                 )
                 raise MlflowException(
                     "Cannot disable workspaces because registered models exist outside the default "
@@ -242,11 +257,14 @@ class SqlAlchemyStore(AbstractStore):
             )
 
             if exists_non_default_webhook:
-                webhook_id, workspace = (
-                    session
-                    .query(SqlWebhook.webhook_id, SqlWebhook.workspace)
-                    .filter(SqlWebhook.workspace != DEFAULT_WORKSPACE_NAME)
-                    .first()
+                webhook_id, workspace = cast(
+                    "tuple[str, str]",
+                    (
+                        session
+                        .query(SqlWebhook.webhook_id, SqlWebhook.workspace)
+                        .filter(SqlWebhook.workspace != DEFAULT_WORKSPACE_NAME)
+                        .first()
+                    ),
                 )
                 raise MlflowException(
                     "Cannot disable workspaces because webhooks exist outside the default "
@@ -255,14 +273,14 @@ class SqlAlchemyStore(AbstractStore):
                     error_code=INVALID_STATE,
                 )
 
-    def _get_dialect(self):
+    def _get_dialect(self) -> str:
         return self.engine.dialect.name
 
-    def _dispose_engine(self):
+    def _dispose_engine(self) -> None:
         self.engine.dispose()
 
     @staticmethod
-    def _verify_registry_tables_exist(engine):
+    def _verify_registry_tables_exist(engine: sqlalchemy.engine.Engine) -> None:
         # Verify that all tables have been created.
         inspected_tables = set(sqlalchemy.inspect(engine).get_table_names())
         expected_tables = [
@@ -278,7 +296,7 @@ class SqlAlchemyStore(AbstractStore):
             raise MlflowException("Database migration in unexpected state. Run manual upgrade.")
 
     @staticmethod
-    def _get_eager_registered_model_query_options():
+    def _get_eager_registered_model_query_options() -> list[Any]:
         """
         A list of SQLAlchemy query options that can be used to eagerly
         load the following registered model attributes
@@ -295,7 +313,7 @@ class SqlAlchemyStore(AbstractStore):
         ]
 
     def _get_latest_versions_for_models(
-        self, session, model_names: list[str]
+        self, session: Session, model_names: list[str]
     ) -> dict[str, list[SqlModelVersion]]:
         """
         Batch-fetch the latest model version per stage for multiple registered models.
@@ -347,7 +365,9 @@ class SqlAlchemyStore(AbstractStore):
             .options(*self._get_eager_model_version_query_options())
         )
 
-        latest_versions = session.execute(query).scalars().all()
+        # Rows come back from a window-function join over legacy declarative models whose
+        # column attributes are statically typed as ``Column``; keep the row type loose here.
+        latest_versions: Sequence[Any] = session.execute(query).scalars().all()
 
         result: dict[str, list[SqlModelVersion]] = {name: [] for name in model_names}
         for mv in latest_versions:
@@ -356,7 +376,7 @@ class SqlAlchemyStore(AbstractStore):
         return result
 
     @staticmethod
-    def _get_eager_model_version_query_options():
+    def _get_eager_model_version_query_options() -> list[Any]:
         """
         A list of SQLAlchemy query options that can be used to eagerly
         load the following model version attributes
@@ -368,7 +388,7 @@ class SqlAlchemyStore(AbstractStore):
         # loading_relationships.html#relationship-loading-techniques
         return [sqlalchemy.orm.subqueryload(SqlModelVersion.model_version_tags)]
 
-    def _get_workspace_clauses(self, model):
+    def _get_workspace_clauses(self, model: type[Any]) -> list[ColumnElement[bool]]:
         """
         Return workspace filter clauses for the model.
         Always filter on workspace for relevant models, to benefit from DB index.
@@ -377,7 +397,13 @@ class SqlAlchemyStore(AbstractStore):
             return [model.workspace == self._get_active_workspace()]
         return []
 
-    def create_registered_model(self, name, tags=None, description=None, deployment_job_id=None):
+    def create_registered_model(
+        self,
+        name: str,
+        tags: list[RegisteredModelTag] | None = None,
+        description: str | None = None,
+        deployment_job_id: str | None = None,
+    ) -> RegisteredModel:
         """
         Create a new registered model in backend store.
 
@@ -417,14 +443,15 @@ class SqlAlchemyStore(AbstractStore):
                 ]
                 session.add(registered_model)
                 session.flush()
-                return registered_model.to_mlflow_entity()
+                entity: RegisteredModel = registered_model.to_mlflow_entity()
+                return entity
             except sqlalchemy.exc.IntegrityError:
                 existing_model = self.get_registered_model(name)
                 handle_resource_already_exist_error(
                     name, has_prompt_tag(existing_model._tags), has_prompt_tag(tags)
                 )
 
-    def _get_registered_model(self, session, name, eager=False):
+    def _get_registered_model(self, session: Session, name: str, eager: bool = False):
         """
         Args:
             eager: If ``True``, eagerly loads the registered model's tags. If ``False``, these
@@ -447,7 +474,9 @@ class SqlAlchemyStore(AbstractStore):
             )
         return rms[0]
 
-    def update_registered_model(self, name, description, deployment_job_id=None):
+    def update_registered_model(
+        self, name: str, description: str, deployment_job_id: str | None = None
+    ) -> RegisteredModel:
         """
         Update description of the registered model.
 
@@ -467,9 +496,10 @@ class SqlAlchemyStore(AbstractStore):
             sql_registered_model.last_updated_time = updated_time
             session.add(sql_registered_model)
             session.flush()
-            return sql_registered_model.to_mlflow_entity()
+            entity: RegisteredModel = sql_registered_model.to_mlflow_entity()
+            return entity
 
-    def rename_registered_model(self, name, new_name):
+    def rename_registered_model(self, name: str, new_name: str) -> RegisteredModel:
         """
         Rename the registered model.
 
@@ -493,14 +523,15 @@ class SqlAlchemyStore(AbstractStore):
                 sql_registered_model.last_updated_time = updated_time
                 session.add_all([sql_registered_model] + sql_registered_model.model_versions)
                 session.flush()
-                return sql_registered_model.to_mlflow_entity()
+                entity: RegisteredModel = sql_registered_model.to_mlflow_entity()
+                return entity
             except sqlalchemy.exc.IntegrityError as e:
                 raise MlflowException(
                     f"Registered Model (name={new_name}) already exists. Error: {e}",
                     RESOURCE_ALREADY_EXISTS,
                 )
 
-    def delete_registered_model(self, name):
+    def delete_registered_model(self, name: str) -> None:
         """
         Delete the registered model.
         Backend raises exception if a registered model with given name does not exist.
@@ -515,8 +546,10 @@ class SqlAlchemyStore(AbstractStore):
             sql_registered_model = self._get_registered_model(session, name)
             session.delete(sql_registered_model)
 
-    def _compute_next_token(self, max_results_for_query, current_size, offset, max_results):
-        next_token = None
+    def _compute_next_token(
+        self, max_results_for_query: int, current_size: int, offset: int, max_results: int
+    ) -> str | None:
+        next_token: str | None = None
         if max_results_for_query == current_size:
             final_offset = offset + max_results
             next_token = SearchUtils.create_page_token(final_offset)
@@ -524,11 +557,11 @@ class SqlAlchemyStore(AbstractStore):
 
     def search_registered_models(
         self,
-        filter_string=None,
-        max_results=SEARCH_REGISTERED_MODEL_MAX_RESULTS_DEFAULT,
-        order_by=None,
-        page_token=None,
-    ):
+        filter_string: str | None = None,
+        max_results: int | None = SEARCH_REGISTERED_MODEL_MAX_RESULTS_DEFAULT,
+        order_by: list[str] | None = None,
+        page_token: str | None = None,
+    ) -> PagedList[RegisteredModel]:
         """
         Search for registered models in backend that satisfy the filter criteria.
 
@@ -586,9 +619,11 @@ class SqlAlchemyStore(AbstractStore):
             ]
             return PagedList(rm_entities, next_page_token)
 
-    def _get_search_registered_model_filter_query(self, session, parsed_filters, dialect):
-        attribute_filters = []
-        tag_filters = {}
+    def _get_search_registered_model_filter_query(
+        self, session: Session, parsed_filters: list[dict[str, Any]], dialect: str
+    ) -> Select[Any]:
+        attribute_filters: list[ColumnElement[bool]] = []
+        tag_filters: dict[str, list[Any]] = {}
         tag_where_clauses = self._get_workspace_clauses(SqlRegisteredModelTag)
         for f in parsed_filters:
             type_ = f["type"]
@@ -662,9 +697,11 @@ class SqlAlchemyStore(AbstractStore):
         else:
             return rm_query
 
-    def _get_search_model_versions_filter_clauses(self, parsed_filters, dialect):
-        attribute_filters = []
-        tag_filters = {}
+    def _get_search_model_versions_filter_clauses(
+        self, parsed_filters: list[dict[str, Any]], dialect: str
+    ) -> Select[Any]:
+        attribute_filters: list[ColumnElement[bool]] = []
+        tag_filters: dict[str, list[Any]] = {}
         tag_where_clauses = self._get_workspace_clauses(SqlModelVersionTag)
         for f in parsed_filters:
             type_ = f["type"]
@@ -775,12 +812,12 @@ class SqlAlchemyStore(AbstractStore):
 
     def _update_query_to_exclude_prompts(
         self,
-        query: Any,
+        query: Select[Any],
         tag_filters: dict[str, list[Any]],
         dialect: str,
-        main_db_model: SqlModelVersion | SqlRegisteredModel,
-        tag_db_model: SqlModelVersionTag | SqlRegisteredModelTag,
-    ):
+        main_db_model: type[SqlModelVersion] | type[SqlRegisteredModel],
+        tag_db_model: type[SqlModelVersionTag] | type[SqlRegisteredModelTag],
+    ) -> Select[Any]:
         """
         Update query to exclude all prompt rows and return only normal model or model versions.
 
@@ -824,26 +861,31 @@ class SqlAlchemyStore(AbstractStore):
             if f["type"] != "tag" or f["key"] != IS_PROMPT_TAG_KEY:
                 continue
 
-            return (f["comparator"] == "=" and f["value"].lower() == "true") or (
-                f["comparator"] == "!=" and f["value"].lower() == "false"
+            comparator: str = f["comparator"]
+            value: str = f["value"]
+            return (comparator == "=" and value.lower() == "true") or (
+                comparator == "!=" and value.lower() == "false"
             )
 
         # Query should return only normal models by default
         return False
 
     @classmethod
-    def _parse_search_registered_models_order_by(cls, order_by_list):
+    def _parse_search_registered_models_order_by(
+        cls, order_by_list: list[str] | None
+    ) -> list[ColumnElement[Any]]:
         """Sorts a set of registered models based on their natural ordering and an overriding set
         of order_bys. Registered models are naturally ordered first by name ascending.
         """
-        clauses = []
-        observed_order_by_clauses = set()
+        clauses: list[ColumnElement[Any]] = []
+        observed_order_by_clauses: set[str] = set()
         if order_by_list:
             for order_by_clause in order_by_list:
                 (
                     attribute_token,
                     ascending,
                 ) = SearchUtils.parse_order_by_for_search_registered_models(order_by_clause)
+                field: ColumnElement[Any]
                 if attribute_token == SqlRegisteredModel.name.key:
                     field = SqlRegisteredModel.name
                 elif attribute_token in SearchUtils.VALID_TIMESTAMP_ORDER_BY_KEYS:
@@ -867,7 +909,7 @@ class SqlAlchemyStore(AbstractStore):
             clauses.append(SqlRegisteredModel.name.asc())
         return clauses
 
-    def get_registered_model(self, name):
+    def get_registered_model(self, name: str) -> RegisteredModel:
         """
         Get registered model instance by name.
 
@@ -878,9 +920,12 @@ class SqlAlchemyStore(AbstractStore):
             A single :py:class:`mlflow.entities.model_registry.RegisteredModel` object.
         """
         with self.ManagedSessionMaker() as session:
-            return self._get_registered_model(session, name, eager=True).to_mlflow_entity()
+            entity: RegisteredModel = self._get_registered_model(
+                session, name, eager=True
+            ).to_mlflow_entity()
+            return entity
 
-    def get_latest_versions(self, name, stages=None):
+    def get_latest_versions(self, name: str, stages: list[str] | None = None) -> list[ModelVersion]:
         """
         Latest version models for each requested stage. If no ``stages`` argument is provided,
         returns the latest version for each stage.
@@ -911,7 +956,9 @@ class SqlAlchemyStore(AbstractStore):
 
             return mvs
 
-    def _get_registered_model_tag(self, session, name, key):
+    def _get_registered_model_tag(
+        self, session: Session, name: str, key: str
+    ) -> SqlRegisteredModelTag | None:
         tags = (
             self
             ._get_query(session, SqlRegisteredModelTag)
@@ -929,9 +976,10 @@ class SqlAlchemyStore(AbstractStore):
                 f"Found {len(tags)}.",
                 INVALID_STATE,
             )
-        return tags[0]
+        tag: SqlRegisteredModelTag = tags[0]
+        return tag
 
-    def set_registered_model_tag(self, name, tag):
+    def set_registered_model_tag(self, name: str, tag: RegisteredModelTag) -> None:
         """
         Set a tag for the registered model.
 
@@ -956,7 +1004,7 @@ class SqlAlchemyStore(AbstractStore):
                 )
             )
 
-    def delete_registered_model_tag(self, name, key):
+    def delete_registered_model_tag(self, name: str, key: str) -> None:
         """
         Delete a tag associated with the registered model.
 
@@ -980,15 +1028,15 @@ class SqlAlchemyStore(AbstractStore):
 
     def create_model_version(
         self,
-        name,
-        source,
-        run_id=None,
-        tags=None,
-        run_link=None,
-        description=None,
-        local_model_path=None,
+        name: str,
+        source: str,
+        run_id: str | None = None,
+        tags: list[ModelVersionTag] | None = None,
+        run_link: str | None = None,
+        description: str | None = None,
+        local_model_path: str | None = None,
         model_id: str | None = None,
-    ):
+    ) -> ModelVersion:
         """
         Create a new model version from given source and run ID.
 
@@ -1026,7 +1074,7 @@ class SqlAlchemyStore(AbstractStore):
                     run_id = run_id or model.source_run_id
                 else:
                     storage_location = self.get_model_version_download_uri(
-                        parsed_model_uri.name, parsed_model_uri.version
+                        cast(str, parsed_model_uri.name), cast(str, parsed_model_uri.version)
                     )
             except Exception as e:
                 raise MlflowException(
@@ -1095,14 +1143,23 @@ class SqlAlchemyStore(AbstractStore):
             f"{self.CREATE_MODEL_VERSION_RETRIES} attempts."
         )
 
-    def _populate_model_version_aliases(self, session, name, version):
+    def _populate_model_version_aliases(
+        self, session: Session, name: str, version: ModelVersion
+    ) -> ModelVersion:
         model_aliases = self._get_registered_model(session, name).registered_model_aliases
         version.aliases = [
             alias.alias for alias in model_aliases if alias.version == version.version
         ]
         return version
 
-    def _get_model_version_from_db(self, session, name, version, conditions, query_options=None):
+    def _get_model_version_from_db(
+        self,
+        session: Session,
+        name: str,
+        version: str | int,
+        conditions: list[ColumnElement[bool]],
+        query_options: list[Any] | None = None,
+    ):
         if query_options is None:
             query_options = []
         versions = (
@@ -1126,7 +1183,9 @@ class SqlAlchemyStore(AbstractStore):
             )
         return versions[0]
 
-    def _get_sql_model_version(self, session, name, version, eager=False):
+    def _get_sql_model_version(
+        self, session: Session, name: str, version: str | int, eager: bool = False
+    ):
         """
         Args:
             eager: If ``True``, eagerly loads the model version's tags.
@@ -1144,7 +1203,9 @@ class SqlAlchemyStore(AbstractStore):
         ]
         return self._get_model_version_from_db(session, name, version, conditions, query_options)
 
-    def _get_sql_model_version_including_deleted(self, name, version):
+    def _get_sql_model_version_including_deleted(
+        self, name: str, version: str | int
+    ) -> ModelVersion:
         """
         Private method to retrieve model versions including those that are internally deleted.
         Used in tests to verify redaction behavior on deletion.
@@ -1166,7 +1227,9 @@ class SqlAlchemyStore(AbstractStore):
                 session, name, sql_model_version.to_mlflow_entity()
             )
 
-    def update_model_version(self, name, version, description=None):
+    def update_model_version(
+        self, name: str, version: str | int, description: str | None = None
+    ) -> ModelVersion:
         """
         Update metadata associated with a model version in backend.
 
@@ -1189,7 +1252,9 @@ class SqlAlchemyStore(AbstractStore):
                 session, name, sql_model_version.to_mlflow_entity()
             )
 
-    def transition_model_version_stage(self, name, version, stage, archive_existing_versions):
+    def transition_model_version_stage(
+        self, name: str, version: str | int, stage: str, archive_existing_versions: bool
+    ) -> ModelVersion:
         """
         Update model version stage.
 
@@ -1217,7 +1282,7 @@ class SqlAlchemyStore(AbstractStore):
         with self.ManagedSessionMaker(read_only=False) as session:
             last_updated_time = get_current_time_millis()
 
-            model_versions = []
+            model_versions: list[Any] = []
             if archive_existing_versions:
                 conditions = [
                     SqlModelVersion.name == name,
@@ -1241,7 +1306,7 @@ class SqlAlchemyStore(AbstractStore):
                 session, name, sql_model_version.to_mlflow_entity()
             )
 
-    def delete_model_version(self, name, version):
+    def delete_model_version(self, name: str, version: str | int) -> None:
         """
         Delete model version in backend.
 
@@ -1272,7 +1337,7 @@ class SqlAlchemyStore(AbstractStore):
             sql_model_version.status_message = None
             session.add_all([sql_registered_model, sql_model_version])
 
-    def get_model_version(self, name, version):
+    def get_model_version(self, name: str, version: str | int) -> ModelVersion:
         """
         Get the model version instance by name and version.
 
@@ -1289,7 +1354,7 @@ class SqlAlchemyStore(AbstractStore):
                 session, name, sql_model_version.to_mlflow_entity()
             )
 
-    def get_model_version_download_uri(self, name, version):
+    def get_model_version_download_uri(self, name: str, version: str | int) -> str:
         """
         Get the download location in Model Registry for this model version.
         NOTE: For first version of Model Registry, since the models are not copied over to another
@@ -1304,15 +1369,16 @@ class SqlAlchemyStore(AbstractStore):
         """
         with self.ManagedSessionMaker() as session:
             sql_model_version = self._get_sql_model_version(session, name, version)
-            return sql_model_version.storage_location or sql_model_version.source
+            download_uri: str = sql_model_version.storage_location or sql_model_version.source
+            return download_uri
 
     def search_model_versions(
         self,
-        filter_string=None,
-        max_results=SEARCH_MODEL_VERSION_MAX_RESULTS_DEFAULT,
-        order_by=None,
-        page_token=None,
-    ):
+        filter_string: str | None = None,
+        max_results: int | None = SEARCH_MODEL_VERSION_MAX_RESULTS_DEFAULT,
+        order_by: list[str] | None = None,
+        page_token: str | None = None,
+    ) -> PagedList[ModelVersion]:
         """
         Search for model versions in backend that satisfy the filter criteria.
 
@@ -1378,13 +1444,15 @@ class SqlAlchemyStore(AbstractStore):
             return PagedList(model_versions, next_page_token)
 
     @classmethod
-    def _parse_search_model_versions_order_by(cls, order_by_list):
+    def _parse_search_model_versions_order_by(
+        cls, order_by_list: list[str] | None
+    ) -> list[ColumnElement[Any]]:
         """Sorts a set of model versions based on their natural ordering and an overriding set
         of order_bys. Model versions are naturally ordered first by name ascending, then by
         version ascending.
         """
-        clauses = []
-        observed_order_by_clauses = set()
+        clauses: list[ColumnElement[Any]] = []
+        observed_order_by_clauses: set[str | None] = set()
         if order_by_list:
             for order_by_clause in order_by_list:
                 (
@@ -1394,6 +1462,7 @@ class SqlAlchemyStore(AbstractStore):
                 ) = SearchModelVersionUtils.parse_order_by_for_search_model_versions(
                     order_by_clause
                 )
+                field: ColumnElement[Any]
                 if key not in SearchModelVersionUtils.VALID_ORDER_BY_ATTRIBUTE_KEYS:
                     raise MlflowException(
                         f"Invalid order by key '{key}' specified. "
@@ -1424,7 +1493,9 @@ class SqlAlchemyStore(AbstractStore):
             clauses.append(SqlModelVersion.version.desc())
         return clauses
 
-    def _get_model_version_tag(self, session, name, version, key):
+    def _get_model_version_tag(
+        self, session: Session, name: str, version: str | int, key: str
+    ) -> SqlModelVersionTag | None:
         tags = (
             self
             ._get_query(session, SqlModelVersionTag)
@@ -1443,9 +1514,10 @@ class SqlAlchemyStore(AbstractStore):
                 f"key={key}. Found {len(tags)}.",
                 INVALID_STATE,
             )
-        return tags[0]
+        tag: SqlModelVersionTag = tags[0]
+        return tag
 
-    def set_model_version_tag(self, name, version, tag):
+    def set_model_version_tag(self, name: str, version: str | int, tag: ModelVersionTag) -> None:
         """
         Set a tag for the model version.
 
@@ -1473,7 +1545,7 @@ class SqlAlchemyStore(AbstractStore):
                 )
             )
 
-    def delete_model_version_tag(self, name, version, key):
+    def delete_model_version_tag(self, name: str, version: str | int, key: str) -> None:
         """
         Delete a tag associated with the model version.
 
@@ -1495,7 +1567,9 @@ class SqlAlchemyStore(AbstractStore):
             if existing_tag is not None:
                 session.delete(existing_tag)
 
-    def _get_registered_model_alias(self, session, name, alias):
+    def _get_registered_model_alias(
+        self, session: Session, name: str, alias: str
+    ) -> SqlRegisteredModelAlias | None:
         return (
             self
             ._get_query(session, SqlRegisteredModelAlias)
@@ -1506,7 +1580,7 @@ class SqlAlchemyStore(AbstractStore):
             .first()
         )
 
-    def set_registered_model_alias(self, name, alias, version):
+    def set_registered_model_alias(self, name: str, alias: str, version: str | int) -> None:
         """
         Set a registered model alias pointing to a model version.
 
@@ -1534,7 +1608,7 @@ class SqlAlchemyStore(AbstractStore):
                 )
             )
 
-    def delete_registered_model_alias(self, name, alias):
+    def delete_registered_model_alias(self, name: str, alias: str) -> None:
         """
         Delete an alias associated with a registered model.
 
@@ -1554,7 +1628,7 @@ class SqlAlchemyStore(AbstractStore):
             if existing_alias is not None:
                 session.delete(existing_alias)
 
-    def get_model_version_by_alias(self, name, alias):
+    def get_model_version_by_alias(self, name: str, alias: str) -> ModelVersion:
         """
         Get the model version instance by name and alias.
 
@@ -1581,8 +1655,12 @@ class SqlAlchemyStore(AbstractStore):
             self._get_registered_model(session, name)
             existing_alias = self._get_registered_model_alias(session, name, alias)
             if existing_alias is not None:
+                # Legacy declarative models type column attributes as ``Column``; narrow to the
+                # plain values stored in them.
                 sql_model_version = self._get_sql_model_version(
-                    session, existing_alias.name, existing_alias.version
+                    session,
+                    cast(str, existing_alias.name),
+                    cast(int, existing_alias.version),
                 )
                 return self._populate_model_version_aliases(
                     session, name, sql_model_version.to_mlflow_entity()
@@ -1592,7 +1670,7 @@ class SqlAlchemyStore(AbstractStore):
                     f"Registered model alias {alias} not found.", INVALID_PARAMETER_VALUE
                 )
 
-    def _await_model_version_creation(self, mv, await_creation_for):
+    def _await_model_version_creation(self, mv: ModelVersion, await_creation_for: int) -> None:
         """
         Does not wait for the model version to become READY as a successful creation will
         immediately place the model version in a READY state.
@@ -1637,12 +1715,14 @@ class SqlAlchemyStore(AbstractStore):
                 for e in events
             )
             session.flush()
-            return webhook.to_mlflow_entity()
+            entity: Webhook = webhook.to_mlflow_entity()
+            return entity
 
     def get_webhook(self, webhook_id: str) -> Webhook:
         with self.ManagedSessionMaker() as session:
             webhook = self._get_webhook_by_id(session, webhook_id)
-            return webhook.to_mlflow_entity()
+            entity: Webhook = webhook.to_mlflow_entity()
+            return entity
 
     def list_webhooks(
         self,
@@ -1764,7 +1844,8 @@ class SqlAlchemyStore(AbstractStore):
             session.add(webhook)
             session.flush()
 
-            return webhook.to_mlflow_entity()
+            entity: Webhook = webhook.to_mlflow_entity()
+            return entity
 
     def delete_webhook(self, webhook_id: str) -> None:
         with self.ManagedSessionMaker(read_only=False) as session:
@@ -1779,7 +1860,7 @@ class SqlAlchemyStore(AbstractStore):
 
     # Helper methods for webhooks
     def _get_webhook_by_id(self, session: Session, webhook_id: str) -> SqlWebhook:
-        if webhook := (
+        webhook: SqlWebhook | None = (
             self
             ._get_query(session, SqlWebhook)
             .filter(
@@ -1787,7 +1868,8 @@ class SqlAlchemyStore(AbstractStore):
                 SqlWebhook.deleted_timestamp.is_(None),
             )
             .first()
-        ):
+        )
+        if webhook is not None:
             return webhook
 
         raise MlflowException(f"Webhook with ID {webhook_id} not found.", RESOURCE_DOES_NOT_EXIST)

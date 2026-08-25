@@ -888,7 +888,8 @@ class AbstractStore:
             if hasattr(rm, "_tags") and isinstance(rm._tags, dict):
                 internal_tags = rm._tags.copy()
             elif hasattr(rm, "_tags") and rm._tags:
-                internal_tags = {tag.key: tag.value for tag in rm._tags}  # type: ignore[attr-defined]
+                legacy_internal_tags: list[RegisteredModelTag] = getattr(rm, "_tags", [])
+                internal_tags = {tag.key: tag.value for tag in legacy_internal_tags}
             else:
                 internal_tags = {}
 
@@ -1005,7 +1006,8 @@ class AbstractStore:
         if hasattr(rm, "_tags") and isinstance(rm._tags, dict):
             internal_tags = rm._tags
         elif hasattr(rm, "_tags") and rm._tags:
-            internal_tags = {tag.key: tag.value for tag in rm._tags}  # type: ignore[attr-defined]
+            legacy_internal_tags: list[RegisteredModelTag] = getattr(rm, "_tags", [])
+            internal_tags = {tag.key: tag.value for tag in legacy_internal_tags}
         else:
             internal_tags = {}
 
