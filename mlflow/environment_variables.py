@@ -8,6 +8,7 @@ MLflow's environment variables adhere to the following naming conventions:
 import os
 import warnings
 from pathlib import Path
+from typing import Any
 
 
 class _EnvironmentVariable:
@@ -23,22 +24,22 @@ class _EnvironmentVariable:
         self.default = default
 
     @property
-    def defined(self):
+    def defined(self) -> bool:
         return self.name in os.environ
 
-    def get_raw(self):
+    def get_raw(self) -> str | None:
         return os.environ.get(self.name)
 
-    def set(self, value):
+    def set(self, value: Any) -> None:
         os.environ[self.name] = str(value)
 
-    def unset(self):
+    def unset(self) -> None:
         os.environ.pop(self.name, None)
 
-    def is_set(self):
+    def is_set(self) -> bool:
         return self.name in os.environ
 
-    def get(self):
+    def get(self) -> Any:
         """
         Reads the value of the environment variable if it exists and converts it to the desired
         type. Otherwise, returns the default value.
@@ -72,7 +73,7 @@ class _BooleanEnvironmentVariable(_EnvironmentVariable):
             raise ValueError(f"{name} default value must be one of [True, False, None]")
         super().__init__(name, bool, default)
 
-    def get(self):
+    def get(self) -> bool | None:
         # TODO: Remove this block in MLflow 3.2.0
         if self.name == MLFLOW_CONFIGURE_LOGGING.name and (
             val := os.environ.get("MLFLOW_LOGGING_CONFIGURE_LOGGING")
