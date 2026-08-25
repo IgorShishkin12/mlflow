@@ -297,8 +297,12 @@ class AzureBlobArtifactRepository(ArtifactRepository, MultipartUploadMixin):
         block_ids = []
         # parts defaults to None here; iterating it unguarded raises TypeError at runtime,
         # so callers must always pass the parts collected from create_multipart_upload.
-        for part in parts:  # type: ignore[union-attr]
-            qs = urllib.parse.urlparse(part.url).query
+        mpu_parts = cast(list[MultipartUploadPart], parts)
+        for part in mpu_parts:
+            # Every part URL was minted locally by create_multipart_upload above; the
+            # entity's Optional exists for flows whose parts come from a server.
+            part_url = cast(str, part.url)
+            qs = urllib.parse.urlparse(part_url).query
             block_id = urllib.parse.parse_qs(qs)["blockid"][0]
             block_id = decode_base64(urllib.parse.unquote(block_id))
             block_ids.append(block_id)

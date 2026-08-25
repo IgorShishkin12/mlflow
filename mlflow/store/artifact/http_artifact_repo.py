@@ -3,7 +3,7 @@ import os
 import posixpath
 import time
 from concurrent.futures import ThreadPoolExecutor, as_completed
-from typing import Any
+from typing import Any, cast
 
 import requests
 from requests import HTTPError
@@ -43,15 +43,9 @@ from mlflow.utils.file_utils import (
     remove_on_error,
 )
 from mlflow.utils.mime_type_utils import _guess_mime_type
-from mlflow.utils.request_utils import download_chunk
-from mlflow.utils.rest_utils import (  # type: ignore[attr-defined]
-    augmented_raise_for_status,
-    http_request,
-)
+from mlflow.utils.request_utils import augmented_raise_for_status, download_chunk
+from mlflow.utils.rest_utils import http_request
 from mlflow.utils.uri import validate_path_is_safe
-
-# augmented_raise_for_status is not explicitly re-exported by rest_utils.__all__,
-# hence the attr-defined ignore on its import above.
 
 _logger = logging.getLogger(__name__)
 
@@ -319,7 +313,7 @@ class HttpArtifactRepository(ArtifactRepository, MultipartUploadMixin):
     def complete_multipart_upload(
         self,
         local_file: str,
-        upload_id: str,
+        upload_id: str | None,
         parts: list[MultipartUploadPart] | None = None,
         artifact_path: str | None = None,
     ) -> None:
@@ -327,18 +321,19 @@ class HttpArtifactRepository(ArtifactRepository, MultipartUploadMixin):
             "/mlflow-artifacts/mpu/complete", artifact_path
         )
         host_creds = get_default_host_creds(uri)
+        # parts defaults to None here; iterating it unguarded raises TypeError at
+        # runtime, so callers must always pass the collected parts.
+        mpu_parts = cast(list[MultipartUploadPart], parts)
         params = {
             "path": local_file,
             "upload_id": upload_id,
-            # parts defaults to None here; iterating it unguarded raises TypeError at
-            # runtime, so callers must always pass the collected parts.
-            "parts": [part.to_dict() for part in parts],  # type: ignore[union-attr]
+            "parts": [part.to_dict() for part in mpu_parts],
         }
         resp = http_request(host_creds, endpoint, "POST", json=params)
         augmented_raise_for_status(resp)
 
     def abort_multipart_upload(
-        self, local_file: str, upload_id: str, artifact_path: str | None = None
+        self, local_file: str, upload_id: str | None, artifact_path: str | None = None
     ) -> None:
         uri, endpoint = self._construct_artifact_uri_and_path(
             "/mlflow-artifacts/mpu/abort", artifact_path
@@ -381,7 +376,8 @@ class HttpArtifactRepository(ArtifactRepository, MultipartUploadMixin):
         except HTTPError as e:
             # HTTPError raised by raise_for_status always carries its response, but
             # requests types it as Optional.
-            error_message = e.response.json().get("message", "")  # type: ignore[union-attr]
+            response = cast(requests.Response, e.response)
+            error_message = response.json().get("message", "")
             if isinstance(error_message, str) and error_message.startswith(
                 _UnsupportedMultipartUploadException.MESSAGE
             ):
@@ -409,17 +405,8 @@ class HttpArtifactRepository(ArtifactRepository, MultipartUploadMixin):
             parts = sorted(parts.values(), key=lambda part: part.part_number)
             # The server always returns an upload_id for this repository; the entity types
             # it as str | None because other backends (e.g. Azure Blob) need not mint one.
-            self.complete_multipart_upload(
-                local_file,
-                create.upload_id,  # type: ignore[arg-type]
-                parts,
-                artifact_path,
-            )
+            self.complete_multipart_upload(local_file, create.upload_id, parts, artifact_path)
         except Exception as e:
-            self.abort_multipart_upload(
-                local_file,
-                create.upload_id,  # type: ignore[arg-type]
-                artifact_path,
-            )
+            self.abort_multipart_upload(local_file, create.upload_id, artifact_path)
             _logger.warning(f"Failed to upload file {local_file} using multipart upload: {e}")
             raise

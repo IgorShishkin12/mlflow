@@ -70,13 +70,9 @@ from mlflow.utils.file_utils import (
     read_chunk,
 )
 from mlflow.utils.proto_json_utils import message_to_json
-from mlflow.utils.request_utils import cloud_storage_http_request
-
-# augmented_raise_for_status is defined in mlflow.utils.rest_utils but is not re-exported
-# there under mypy's no-implicit-reexport setting.
-from mlflow.utils.rest_utils import (  # type: ignore[attr-defined]
+from mlflow.utils.request_utils import augmented_raise_for_status, cloud_storage_http_request
+from mlflow.utils.rest_utils import (
     _REST_API_PATH_PREFIX,
-    augmented_raise_for_status,
     call_endpoint,
     extract_api_info_for_service,
 )

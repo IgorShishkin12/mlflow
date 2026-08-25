@@ -638,7 +638,7 @@ def write_local_temp_trace_data_file(trace_data: str) -> Iterator[Path]:
 
 
 @contextmanager
-def _write_local_temp_trace_data_pb_file(data: bytes):
+def _write_local_temp_trace_data_pb_file(data: bytes) -> Iterator[Path]:
     from mlflow.tracing.otel.otel_archival import TRACE_ARCHIVAL_FILENAME
 
     with tempfile.TemporaryDirectory() as temp_dir:
@@ -648,22 +648,20 @@ def _write_local_temp_trace_data_pb_file(data: bytes):
 
 
 def try_read_trace_data(trace_data_path: str | Path) -> dict[str, Any]:
-    # This helper legitimately accepts Path (callers pass tempfile results), but the
-    # trace-data exceptions type artifact_path as str only.
     if not os.path.exists(trace_data_path):
-        raise MlflowTraceDataNotFound(artifact_path=trace_data_path)  # type: ignore[arg-type]
+        raise MlflowTraceDataNotFound(artifact_path=trace_data_path)
     with open(trace_data_path, encoding="utf-8") as f:
         data = f.read()
     if not data:
-        raise MlflowTraceDataNotFound(artifact_path=trace_data_path)  # type: ignore[arg-type]
+        raise MlflowTraceDataNotFound(artifact_path=trace_data_path)
     try:
         trace_data: dict[str, Any] = json.loads(data)
         return trace_data
     except json.decoder.JSONDecodeError as e:
-        raise MlflowTraceDataCorrupted(artifact_path=trace_data_path) from e  # type: ignore[arg-type]
+        raise MlflowTraceDataCorrupted(artifact_path=trace_data_path) from e
 
 
-def _try_read_trace_data_pb(trace_data_path) -> list["Span"]:
+def _try_read_trace_data_pb(trace_data_path: str | Path) -> list["Span"]:
     from mlflow.tracing.otel.otel_archival import traces_data_pb_to_spans
 
     if not os.path.exists(trace_data_path):

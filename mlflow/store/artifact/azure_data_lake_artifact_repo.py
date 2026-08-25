@@ -3,7 +3,7 @@ import posixpath
 import re
 import urllib.parse
 from collections.abc import Callable
-from typing import Any
+from typing import Any, cast
 
 import requests
 
@@ -217,7 +217,8 @@ class AzureDataLakeArtifactRepository(CloudArtifactRepository):
         except requests.HTTPError as e:
             # HTTPError raised by raise_for_status always carries its response, but
             # requests types it as Optional.
-            if e.response.status_code in [403]:  # type: ignore[union-attr]
+            response = cast(requests.Response, e.response)
+            if response.status_code in [403]:
                 new_credentials = self._get_write_credential_infos([artifact_file_path])[0]
                 kwargs["sas_url"] = new_credentials.signed_uri
                 func(**kwargs)

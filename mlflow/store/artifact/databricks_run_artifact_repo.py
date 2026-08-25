@@ -25,7 +25,7 @@ class DatabricksRunArtifactRepository(DatabricksTrackingArtifactRepository):
     def _get_expected_uri_format(self) -> str:
         return "databricks/mlflow-tracking/<EXPERIMENT_ID>/<RUN_ID>"
 
-    def _build_root_path(self, experiment_id: str, match: re.Match, relative_path: str) -> str:
+    def _build_root_path(self, experiment_id: str, match: re.Match[str], relative_path: str) -> str:
         run_id = match.group("run_id")
         return f"/WorkspaceInternal/Mlflow/Artifacts/{experiment_id}/Runs/{run_id}{relative_path}"
 

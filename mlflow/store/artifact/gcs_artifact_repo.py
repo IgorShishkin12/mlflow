@@ -3,7 +3,7 @@ import os
 import posixpath
 import urllib.parse
 from collections.abc import Callable
-from typing import Any, NamedTuple
+from typing import Any, NamedTuple, cast
 
 from packaging.version import Version
 
@@ -297,7 +297,8 @@ class GCSArtifactRepository(ArtifactRepository, MultipartUploadMixin):
         container._upload_id = upload_id
         # parts defaults to None here; iterating it unguarded raises TypeError at runtime,
         # so callers must always pass the parts collected from create_multipart_upload.
-        for part in parts:  # type: ignore[union-attr]
+        mpu_parts = cast(list[MultipartUploadPart], parts)
+        for part in mpu_parts:
             container.register_part(part.part_number, part.etag)
 
         container.finalize(transport=args.transport)
