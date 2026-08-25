@@ -10,7 +10,7 @@ from typing import Any
 
 from opentelemetry import metrics
 from opentelemetry.sdk.metrics import MeterProvider
-from opentelemetry.sdk.metrics.export import PeriodicExportingMetricReader
+from opentelemetry.sdk.metrics.export import MetricExporter, PeriodicExportingMetricReader
 from opentelemetry.sdk.trace import ReadableSpan as OTelReadableSpan
 
 from mlflow.entities.span import SpanType
@@ -33,7 +33,7 @@ class OtelMetricsMixin:
     def __init__(self, *args: Any, **kwargs: Any) -> None:
         """Initialize the mixin and pass through to parent classes."""
         super().__init__(*args, **kwargs)
-        self._duration_histogram = None
+        self._duration_histogram: metrics.Histogram | None = None
         self._trace_manager = InMemoryTraceManager.get_instance()
 
     def _setup_metrics_if_necessary(self) -> None:
@@ -48,14 +48,23 @@ class OtelMetricsMixin:
             return
 
         protocol = _get_otlp_metrics_protocol()
+
+        # The gRPC and HTTP/protobuf exporters are distinct classes with no shared
+        # concrete type other than `MetricExporter`, so they are imported under
+        # separate names and bridged through a common declared local.
+        metric_exporter: MetricExporter
         if protocol == "grpc":
             from opentelemetry.exporter.otlp.proto.grpc.metric_exporter import (
-                OTLPMetricExporter,
+                OTLPMetricExporter as GrpcOTLPMetricExporter,
             )
+
+            metric_exporter = GrpcOTLPMetricExporter(endpoint=endpoint)
         elif protocol == "http/protobuf":
             from opentelemetry.exporter.otlp.proto.http.metric_exporter import (
-                OTLPMetricExporter,
+                OTLPMetricExporter as HttpOTLPMetricExporter,
             )
+
+            metric_exporter = HttpOTLPMetricExporter(endpoint=endpoint)
         else:
             _logger.warning(
                 f"Unsupported OTLP metrics protocol '{protocol}'. "
@@ -64,7 +73,6 @@ class OtelMetricsMixin:
             )
             return
 
-        metric_exporter = OTLPMetricExporter(endpoint=endpoint)
         reader = PeriodicExportingMetricReader(metric_exporter)
         provider = MeterProvider(metric_readers=[reader])
         metrics.set_meter_provider(provider)

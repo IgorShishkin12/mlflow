@@ -2,7 +2,8 @@ import json
 import logging
 import threading
 import weakref
-from typing import Any
+from collections.abc import Mapping
+from typing import cast
 
 from opentelemetry.context import Context
 from opentelemetry.sdk.trace import ReadableSpan as OTelReadableSpan
@@ -13,7 +14,7 @@ from opentelemetry.sdk.trace.export import (
     SpanExporter,
 )
 
-from mlflow.entities.span import create_mlflow_span
+from mlflow.entities.span import LiveSpan, create_mlflow_span
 from mlflow.entities.trace_info import TraceInfo
 from mlflow.environment_variables import (
     MLFLOW_ASYNC_TRACE_LOGGING_MAX_INTERVAL_MILLIS,
@@ -65,7 +66,7 @@ _batch_processor_registry: weakref.WeakSet["BaseMlflowSpanProcessor"] = weakref.
 _batch_processor_registry_lock = threading.Lock()
 
 
-def flush_all_batch_processors(timeout_millis: float = 30000, terminate: bool = False) -> None:
+def flush_all_batch_processors(timeout_millis: int = 30000, terminate: bool = False) -> None:
     """Flush all registered batch processors and their exporters' async queues.
 
     Two-layer flush:
@@ -207,7 +208,7 @@ class BaseMlflowSpanProcessor(OtelMetricsMixin, SimpleSpanProcessor):
         self._pending_on_end_count = 0
         self._pending_on_end_condition = threading.Condition(threading.Lock())
 
-    def on_start(self, span: OTelSpan, parent_context: Context | None = None):
+    def on_start(self, span: OTelSpan, parent_context: Context | None = None) -> None:
         """
         Handle the start of a span. This method is called when an OpenTelemetry span is started.
 
@@ -233,7 +234,10 @@ class BaseMlflowSpanProcessor(OtelMetricsMixin, SimpleSpanProcessor):
                 return
             trace_id = trace_info.trace_id
 
-        InMemoryTraceManager.get_instance().register_span(create_mlflow_span(span, trace_id))
+        # A recording SDK span always produces a LiveSpan from the factory, and the flow
+        # above guarantees `trace_id` is set by the time we get here.
+        mlflow_span = cast("LiveSpan", create_mlflow_span(span, cast(str, trace_id)))
+        InMemoryTraceManager.get_instance().register_span(mlflow_span)
 
     def _start_trace(self, root_span: OTelSpan) -> TraceInfo:
         raise NotImplementedError("Subclasses must implement this method.")
@@ -271,7 +275,9 @@ class BaseMlflowSpanProcessor(OtelMetricsMixin, SimpleSpanProcessor):
                         self._update_trace_info(trace, span)
                         # Set the last active trace ID immediately so that
                         # mlflow.get_trace() returns the correct trace even in batch mode.
-                        _set_last_active_trace_id(trace_id)
+                        # The trace was found in the manager, so its REQUEST_ID attribute is
+                        # a valid MLflow trace ID (str), not None.
+                        _set_last_active_trace_id(cast(str, trace_id))
                 else:
                     _logger.debug(f"Trace data with request ID {trace_id} not found.")
 
@@ -287,13 +293,13 @@ class BaseMlflowSpanProcessor(OtelMetricsMixin, SimpleSpanProcessor):
             self._batch_delegate.shutdown()
         super().shutdown()
 
-    def force_flush(self, timeout_millis: float = 30000) -> bool:
+    def force_flush(self, timeout_millis: int = 30000) -> bool:
         if self._batch_delegate is not None:
             return self._batch_delegate.force_flush(timeout_millis)
         return super().force_flush(timeout_millis)
 
-    def _get_basic_trace_metadata(self) -> dict[str, Any]:
-        metadata = self._env_metadata.copy()
+    def _get_basic_trace_metadata(self) -> dict[str, str]:
+        metadata: dict[str, str] = self._env_metadata.copy()
 
         metadata[TRACE_SCHEMA_VERSION_KEY] = str(TRACE_SCHEMA_VERSION)
 
@@ -323,11 +329,11 @@ class BaseMlflowSpanProcessor(OtelMetricsMixin, SimpleSpanProcessor):
 
         return metadata
 
-    def _get_basic_trace_tags(self, span: OTelReadableSpan) -> dict[str, Any]:
+    def _get_basic_trace_tags(self, span: OTelReadableSpan) -> dict[str, str]:
         # If the trace is created in the context of MLflow model evaluation, we extract the request
         # ID from the prediction context. Otherwise, we create a new trace info by calling the
         # backend API.
-        tags = {}
+        tags: dict[str, str] = {}
         if request_id := maybe_get_request_id(is_evaluate=True):
             tags.update({TraceTagKey.EVAL_REQUEST_ID: request_id})
         if dependencies_schema := maybe_get_dependencies_schemas():
@@ -346,8 +352,12 @@ class BaseMlflowSpanProcessor(OtelMetricsMixin, SimpleSpanProcessor):
         # The trace/span start time needs adjustment to exclude the latency of
         # the backend API call. We already adjusted the span start time in the
         # on_start method, so we reflect the same to the trace start time here.
-        trace.info.request_time = root_span.start_time // 1_000_000  # nanosecond to millisecond
-        trace.info.execution_duration = (root_span.end_time - root_span.start_time) // 1_000_000
+        # OTel types the times as optional, but they are always set once the root
+        # span has ended.
+        start_time = cast(int, root_span.start_time)
+        end_time = cast(int, root_span.end_time)
+        trace.info.request_time = start_time // 1_000_000  # nanosecond to millisecond
+        trace.info.execution_duration = (end_time - start_time) // 1_000_000
 
         # Update trace state from span status, but only if the user hasn't explicitly set
         # a different trace status
@@ -355,12 +365,15 @@ class BaseMlflowSpanProcessor(OtelMetricsMixin, SimpleSpanProcessor):
 
         # TODO: Remove this once the new trace table UI is available that is based on V3 trace.
         # Until then, these two are still used to render the "request" and "response" columns.
+        # NB: The inputs/outputs attributes are always JSON-encoded strings set at span creation;
+        # OTel types attribute maps as optional mappings with heterogeneous value types.
+        root_attributes = cast("Mapping[str, str]", root_span.attributes)
         trace.info.trace_metadata.update({
             TraceMetadataKey.INPUTS: self._truncate_metadata(
-                root_span.attributes.get(SpanAttributeKey.INPUTS)
+                root_attributes.get(SpanAttributeKey.INPUTS)
             ),
             TraceMetadataKey.OUTPUTS: self._truncate_metadata(
-                root_span.attributes.get(SpanAttributeKey.OUTPUTS)
+                root_attributes.get(SpanAttributeKey.OUTPUTS)
             ),
         })
 

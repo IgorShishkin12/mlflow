@@ -1,4 +1,5 @@
 import logging
+from typing import cast
 
 from opentelemetry.sdk.trace import Span as OTelSpan
 from opentelemetry.sdk.trace.export import SpanExporter
@@ -40,10 +41,13 @@ class MlflowV3SpanProcessor(BaseMlflowSpanProcessor):
                 "Experiment ID is not set for trace. It may not be exported to MLflow backend."
             )
 
+        # OTel types the span start time as optional, but it is always set on a started span.
+        request_time = cast(int, root_span.start_time) // 1_000_000  # nanosecond to millisecond
+
         trace_info = TraceInfo(
             trace_id=generate_trace_id_v3(root_span),
             trace_location=TraceLocation.from_experiment_id(experiment_id),
-            request_time=root_span.start_time // 1_000_000,  # nanosecond to millisecond
+            request_time=request_time,
             execution_duration=None,
             state=TraceState.IN_PROGRESS,
             trace_metadata=self._get_basic_trace_metadata(),

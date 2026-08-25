@@ -1,12 +1,13 @@
 import json
 import logging
+from typing import cast
 
 from opentelemetry.context import Context
 from opentelemetry.sdk.trace import ReadableSpan as OTelReadableSpan
 from opentelemetry.sdk.trace import Span as OTelSpan
 from opentelemetry.sdk.trace.export import SimpleSpanProcessor, SpanExporter
 
-from mlflow.entities.span import create_mlflow_span
+from mlflow.entities.span import LiveSpan, create_mlflow_span
 from mlflow.entities.trace_info import TraceInfo
 from mlflow.entities.trace_location import TraceLocation
 from mlflow.entities.trace_state import TraceState
@@ -56,7 +57,7 @@ class InferenceTableSpanProcessor(SimpleSpanProcessor):
         super().__init__(span_exporter)
         self._trace_manager = InMemoryTraceManager.get_instance()
 
-    def on_start(self, span: OTelSpan, parent_context: Context | None = None):
+    def on_start(self, span: OTelSpan, parent_context: Context | None = None) -> None:
         """
         Handle the start of a span. This method is called when an OpenTelemetry span is started.
 
@@ -97,6 +98,8 @@ class InferenceTableSpanProcessor(SimpleSpanProcessor):
             tags.update(dependencies_schema)
 
         if span._parent is None:
+            # OTel types the span start time as optional, but it is always set on a started span.
+            request_time = cast(int, span.start_time) // 1_000_000  # nanosecond to millisecond
             trace_info = TraceInfo(
                 trace_id=trace_id,
                 client_request_id=databricks_request_id,
@@ -105,7 +108,7 @@ class InferenceTableSpanProcessor(SimpleSpanProcessor):
                 #   _get_experiment_id() method because it will fallback to the default
                 #   experiment if the MLFLOW_EXPERIMENT_ID is not set.
                 trace_location=TraceLocation.from_experiment_id(MLFLOW_EXPERIMENT_ID.get()),
-                request_time=span.start_time // 1_000_000,  # nanosecond to millisecond
+                request_time=request_time,
                 execution_duration=None,
                 state=TraceState.IN_PROGRESS,
                 trace_metadata=self._get_trace_metadata(),
@@ -113,7 +116,8 @@ class InferenceTableSpanProcessor(SimpleSpanProcessor):
             )
             self._trace_manager.register_trace(span.context.trace_id, trace_info)
 
-        self._trace_manager.register_span(create_mlflow_span(span, trace_id))
+        # A recording SDK span always produces a LiveSpan from the factory.
+        self._trace_manager.register_span(cast("LiveSpan", create_mlflow_span(span, trace_id)))
 
     def on_end(self, span: OTelReadableSpan) -> None:
         """
@@ -132,7 +136,11 @@ class InferenceTableSpanProcessor(SimpleSpanProcessor):
                 _logger.debug(f"Trace data with trace ID {trace_id} not found.")
                 return
 
-            trace.info.execution_duration = (span.end_time - span.start_time) // 1_000_000
+            # OTel types the span times as optional, but they are always set once the root
+            # span has ended.
+            start_time = cast(int, span.start_time)
+            end_time = cast(int, span.end_time)
+            trace.info.execution_duration = (end_time - start_time) // 1_000_000
 
             # Update trace state from span status, but only if the user hasn't explicitly set
             # a different trace status

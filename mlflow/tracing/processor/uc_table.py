@@ -1,4 +1,5 @@
 import logging
+from typing import cast
 
 from opentelemetry.sdk.trace import ReadableSpan as OTelReadableSpan
 from opentelemetry.sdk.trace import Span as OTelSpan
@@ -42,18 +43,23 @@ class DatabricksUCTableSpanProcessor(BaseMlflowSpanProcessor):
         destination = _MLFLOW_TRACE_USER_DESTINATION.get()
 
         if isinstance(destination, UnityCatalog):
+            # NB: A Unity Catalog table-prefix destination always carries a table prefix when it
+            # is used as a trace location; the entity types the field as optional because it is a
+            # dataclass default.
             trace_location = TraceLocation.from_databricks_uc_table_prefix(
-                destination.catalog_name, destination.schema_name, destination.table_prefix
+                destination.catalog_name,
+                destination.schema_name,
+                cast(str, destination.table_prefix),
             )
-            trace_location.uc_table_prefix._otel_spans_table_name = (
-                destination._otel_spans_table_name
-            )
+            uc_table_location = cast(UnityCatalog, trace_location.uc_table_prefix)
+            uc_table_location._otel_spans_table_name = destination._otel_spans_table_name
             trace_id = generate_trace_id_v4(root_span, destination.full_table_prefix)
         elif isinstance(destination, UCSchemaLocation):
             trace_location = TraceLocation.from_databricks_uc_schema(
                 destination.catalog_name, destination.schema_name
             )
-            trace_location.uc_schema._otel_spans_table_name = destination._otel_spans_table_name
+            uc_schema_location = cast(UCSchemaLocation, trace_location.uc_schema)
+            uc_schema_location._otel_spans_table_name = destination._otel_spans_table_name
             trace_id = generate_trace_id_v4(root_span, destination.schema_location)
         else:
             raise MlflowException(
@@ -69,11 +75,14 @@ class DatabricksUCTableSpanProcessor(BaseMlflowSpanProcessor):
         # response buffer. None outside model serving.
         client_request_id = maybe_get_serving_request_id()
 
+        # OTel types the span start time as optional, but it is always set on a started span.
+        request_time = cast(int, root_span.start_time) // 1_000_000  # nanosecond to millisecond
+
         trace_info = TraceInfo(
             trace_id=trace_id,
             client_request_id=client_request_id,
             trace_location=trace_location,
-            request_time=root_span.start_time // 1_000_000,  # nanosecond to millisecond
+            request_time=request_time,
             execution_duration=None,
             state=TraceState.IN_PROGRESS,
             trace_metadata=metadata,

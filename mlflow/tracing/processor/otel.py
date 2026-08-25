@@ -1,10 +1,14 @@
 import logging
 
+from opentelemetry.context import Context
 from opentelemetry.sdk.trace import ReadableSpan as OTelReadableSpan
+from opentelemetry.sdk.trace import Span as OTelSpan
 from opentelemetry.sdk.trace.export import BatchSpanProcessor, SpanExporter
 
 from mlflow.entities.span import create_mlflow_span
-from mlflow.entities.trace_info import TraceInfo, TraceLocation, TraceState
+from mlflow.entities.trace_info import TraceInfo
+from mlflow.entities.trace_location import TraceLocation
+from mlflow.entities.trace_state import TraceState
 from mlflow.environment_variables import (
     MLFLOW_ENABLE_OTEL_GENAI_SEMCONV,
     MLFLOW_TRACE_ENABLE_OTLP_DUAL_EXPORT,
@@ -47,8 +51,11 @@ class OtelSpanProcessor(OtelMetricsMixin, BatchSpanProcessor):
         if self._should_register_traces:
             self._trace_manager = InMemoryTraceManager.get_instance()
 
-    def on_start(self, span: OTelReadableSpan, parent_context=None):
+    def on_start(self, span: OTelSpan, parent_context: Context | None = None) -> None:
         if self._should_register_traces:
+            # A child span whose root was never registered has no MLflow trace ID yet;
+            # `create_mlflow_span` tolerates the missing ID in that case.
+            trace_id: str | None
             if not span.parent:
                 trace_info = self._create_trace_info(span)
                 trace_id = trace_info.trace_id
@@ -61,7 +68,7 @@ class OtelSpanProcessor(OtelMetricsMixin, BatchSpanProcessor):
 
         super().on_start(span, parent_context)
 
-    def on_end(self, span: OTelReadableSpan):
+    def on_end(self, span: OTelReadableSpan) -> None:
         if self._export_metrics:
             self.record_metrics_for_span(span)
 
@@ -92,7 +99,7 @@ class OtelSpanProcessor(OtelMetricsMixin, BatchSpanProcessor):
             _logger.debug("Failed to translate span to GenAI semconv", exc_info=True)
             return span
 
-    def _create_trace_info(self, span: OTelReadableSpan) -> TraceInfo:
+    def _create_trace_info(self, span: OTelSpan) -> TraceInfo:
         """Create a TraceInfo object from an OpenTelemetry span."""
         return TraceInfo(
             trace_id=generate_trace_id_v3(span),

@@ -1,9 +1,13 @@
 import functools
+from typing import Callable, ParamSpec, TypeVar
 
 from mlflow.exceptions import MlflowTracingException
 
+P = ParamSpec("P")
+R = TypeVar("R")
 
-def raise_as_trace_exception(f):
+
+def raise_as_trace_exception(f: Callable[P, R]) -> Callable[P, R]:
     """
     A decorator to make sure that the decorated function only raises MlflowTracingException.
 
@@ -12,7 +16,7 @@ def raise_as_trace_exception(f):
     """
 
     @functools.wraps(f)
-    def wrapper(*args, **kwargs):
+    def wrapper(*args: P.args, **kwargs: P.kwargs) -> R:
         try:
             return f(*args, **kwargs)
         except Exception as e:

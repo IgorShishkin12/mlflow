@@ -3,12 +3,12 @@ from typing import Any
 from mlflow.entities.assessment import (
     DEFAULT_FEEDBACK_NAME,
     Assessment,
-    AssessmentError,
     Expectation,
     Feedback,
     FeedbackValueType,
     IssueReference,
 )
+from mlflow.entities.assessment_error import AssessmentError
 from mlflow.entities.assessment_source import AssessmentSource
 from mlflow.exceptions import MlflowException
 from mlflow.tracing.client import TracingClient
@@ -238,7 +238,7 @@ def update_assessment(
     )
 
 
-def delete_assessment(trace_id: str, assessment_id: str):
+def delete_assessment(trace_id: str, assessment_id: str) -> None:
     """
     Deletes an assessment associated with a trace.
 

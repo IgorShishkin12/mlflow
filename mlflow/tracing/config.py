@@ -1,4 +1,7 @@
+from __future__ import annotations
+
 from dataclasses import dataclass, field, replace
+from types import TracebackType
 from typing import TYPE_CHECKING, Any, Callable
 
 from mlflow.tracing.utils.processor import validate_span_processors
@@ -15,7 +18,7 @@ class TracingConfig:
     # A list of functions to process spans before export.
     span_processors: list[Callable[["LiveSpan"], None]] = field(default_factory=list)
 
-    def __post_init__(self):
+    def __post_init__(self) -> None:
         self.span_processors = validate_span_processors(self.span_processors)
 
 
@@ -26,7 +29,7 @@ _MLFLOW_TRACING_CONFIG = TracingConfig()
 class TracingConfigContext:
     """Context manager for temporary tracing configuration changes."""
 
-    def __init__(self, config_updates: dict[str, Any]):
+    def __init__(self, config_updates: dict[str, Any]) -> None:
         self.config_updates = config_updates
         # Create a shallow copy of the current config
         self.previous_config = replace(_MLFLOW_TRACING_CONFIG)
@@ -34,10 +37,15 @@ class TracingConfigContext:
         for key, value in self.config_updates.items():
             setattr(_MLFLOW_TRACING_CONFIG, key, value)
 
-    def __enter__(self):
+    def __enter__(self) -> TracingConfigContext:
         return self
 
-    def __exit__(self, exc_type, exc_val, exc_tb):
+    def __exit__(
+        self,
+        exc_type: type[BaseException] | None,
+        exc_val: BaseException | None,
+        exc_tb: TracebackType | None,
+    ) -> None:
         global _MLFLOW_TRACING_CONFIG
         _MLFLOW_TRACING_CONFIG = self.previous_config
 
@@ -52,7 +60,7 @@ def get_config() -> TracingConfig:
     return _MLFLOW_TRACING_CONFIG
 
 
-def reset_config():
+def reset_config() -> None:
     """
     Reset the tracing configuration to defaults.
     """

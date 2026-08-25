@@ -15,13 +15,14 @@ import os
 import random
 import threading
 from contextlib import contextmanager
-from typing import TYPE_CHECKING, Any, Callable, ParamSpec, TypeVar
+from typing import TYPE_CHECKING, Any, Callable, ParamSpec, TypeVar, Union, cast
 
 from opentelemetry import context as context_api
 from opentelemetry import trace
 from opentelemetry.context.contextvars_context import ContextVarsRuntimeContext
 from opentelemetry.sdk.resources import Resource
 from opentelemetry.sdk.trace import SpanProcessor, TracerProvider
+from opentelemetry.sdk.trace.export import SpanExporter
 from opentelemetry.sdk.trace.id_generator import IdGenerator
 from opentelemetry.sdk.trace.sampling import ParentBased
 
@@ -60,7 +61,10 @@ from mlflow.utils.databricks_utils import (
 from mlflow.utils.uri import is_databricks_uri
 
 if TYPE_CHECKING:
-    from mlflow.entities import Span
+    from mlflow.entities import LiveSpan, Span
+
+    # A token returned by attaching an OpenTelemetry context.
+    _OtelContextToken = contextvars.Token[context_api.Context]
 
 
 P = ParamSpec("P")
@@ -73,7 +77,7 @@ _MLFLOW_TRACE_USER_DESTINATION = UserTraceDestinationRegistry()
 _logger = logging.getLogger(__name__)
 
 
-_private_random_generators = set()
+_private_random_generators: set[random.Random] = set()
 if hasattr(os, "register_at_fork"):
     # Re-seed the private random instances in forked child processes to prevent them
     # from generating the same ID sequence as the parent process.
@@ -130,8 +134,12 @@ class _TracerProviderWrapper:
         OpenTelemetry SDK will be exported to the same destination.
     """
 
-    def __init__(self):
-        self._isolated_tracer_provider = None
+    def __init__(self) -> None:
+        # NB: The isolated provider is only None before initialization; every code path that
+        # reads it either runs after `once.do_once()` or has just installed a provider. It can
+        # also hold the API-level NoOpTracerProvider when tracing is disabled, hence the loose
+        # OpenTelemetry API type rather than the SDK class.
+        self._isolated_tracer_provider: trace.TracerProvider | None = None
         self._isolated_tracer_provider_once = Once()
         # Separate once flag for global provider mode. We use MLflow's own flag instead of
         # OTel's _TRACER_PROVIDER_SET_ONCE so that MLflow can initialize its span processors
@@ -145,9 +153,10 @@ class _TracerProviderWrapper:
             return self._isolated_tracer_provider_once
         return self._global_provider_init_once
 
-    def get(self) -> TracerProvider:
+    def get(self) -> trace.TracerProvider:
         if MLFLOW_USE_DEFAULT_TRACER_PROVIDER.get():
-            return self._isolated_tracer_provider
+            # Initialization is guaranteed by `once.do_once()` before this is reached.
+            return cast(trace.TracerProvider, self._isolated_tracer_provider)
         return trace.get_tracer_provider()
 
     def _retire_current_batch_processors(self) -> None:
@@ -180,7 +189,7 @@ class _TracerProviderWrapper:
                 except Exception:
                     _logger.debug(f"Failed to retire OtelSpanProcessor {processor}", exc_info=True)
 
-    def set(self, tracer_provider: TracerProvider):
+    def set(self, tracer_provider: trace.TracerProvider) -> None:
         self._retire_current_batch_processors()
         if MLFLOW_USE_DEFAULT_TRACER_PROVIDER.get():
             self._isolated_tracer_provider = tracer_provider
@@ -194,7 +203,7 @@ class _TracerProviderWrapper:
         self.once.do_once(_initialize_tracer_provider)
         return self.get().get_tracer(module_name)
 
-    def reset(self):
+    def reset(self) -> None:
         self._retire_current_batch_processors()
         if MLFLOW_USE_DEFAULT_TRACER_PROVIDER.get():
             self._isolated_tracer_provider = None
@@ -203,7 +212,7 @@ class _TracerProviderWrapper:
             trace._TRACER_PROVIDER = None
             self._global_provider_init_once._done = False
 
-    def _swap_raw(self, tracer_provider: TracerProvider) -> TracerProvider:
+    def _swap_raw(self, tracer_provider: trace.TracerProvider) -> trace.TracerProvider | None:
         """Install ``tracer_provider`` and return the previous one, without retiring it.
 
         Unlike ``set()``, the outgoing provider is left running so ``trace_disabled``
@@ -211,7 +220,8 @@ class _TracerProviderWrapper:
         BatchSpanProcessor thread. Contract: a concurrent global mutation
         (``enable()``/``set_destination()`` from another thread) during the window
         can be overwritten by the restore; mutating global tracing state from
-        multiple threads at once is unsupported.
+        multiple threads at once is unsupported. Returns None when no provider was
+        installed yet.
         """
         if MLFLOW_USE_DEFAULT_TRACER_PROVIDER.get():
             old = self._isolated_tracer_provider
@@ -291,13 +301,16 @@ def start_span_in_context(name: str, experiment_id: str | None = None) -> trace.
 
 
 @contextmanager
-def with_active_span(span: "Span"):
+def with_active_span(span: "LiveSpan"):
     """
     A context manager that sets the given MLflow span as the active span in the current context.
 
     A fork of OpenTelemetry's `use_span` context manager, but use MLflow's `set_span_in_context` and
     `detach_span_from_context` functions to set and detach the span from the context, in order to
     switch the context depending on the `MLFLOW_USE_DEFAULT_TRACER_PROVIDER` environment variable.
+
+    Args:
+        span: A live MLflow span object to set as the active span.
     """
     try:
         token = set_span_in_context(span)
@@ -315,7 +328,7 @@ def start_detached_span(
     parent: trace.Span | None = None,
     experiment_id: str | None = None,
     start_time_ns: int | None = None,
-) -> tuple[str, trace.Span] | None:
+) -> trace.Span:
     """
     Start a new OpenTelemetry span that is not part of the current trace context, but with the
     explicit parent span ID if provided.
@@ -392,7 +405,10 @@ def safe_set_span_in_context(span: "Span"):
 # Token(s) required to later detach a span from the context. In isolated tracer provider mode a
 # tuple of (MLflow runtime token, optional global OTel token) is returned; otherwise a single
 # OpenTelemetry context token is returned.
-SpanContextToken = contextvars.Token | tuple[contextvars.Token, contextvars.Token | None]
+SpanContextToken = Union[
+    "_OtelContextToken",
+    "tuple[_OtelContextToken, _OtelContextToken | None]",
+]
 
 
 def set_span_in_context(span: "Span") -> SpanContextToken:
@@ -438,7 +454,12 @@ def detach_span_from_context(token: SpanContextToken):
         token: The token returned by `set_span_in_context` function.
     """
     if MLFLOW_USE_DEFAULT_TRACER_PROVIDER.get():
-        mlflow_token, otel_token = token
+        # In this mode the token is always the (MLflow token, OTel token) tuple produced by
+        # `set_span_in_context`.
+        mlflow_token, otel_token = cast(
+            "tuple[_OtelContextToken, _OtelContextToken | None]",
+            token,
+        )
         try:
             # Detach the global OTel context first (reverse order of attach) if it was set.
             if otel_token is not None:
@@ -448,7 +469,8 @@ def detach_span_from_context(token: SpanContextToken):
             # so the isolated runtime context is not leaked.
             mlflow_runtime_context.detach(mlflow_token)
     else:
-        context_api.detach(token)
+        # In unified mode the token is always the single OTel context token.
+        context_api.detach(cast("_OtelContextToken", token))
 
 
 def set_destination(destination: TraceLocationBase, *, context_local: bool = False):
@@ -542,7 +564,7 @@ def set_destination(destination: TraceLocationBase, *, context_local: bool = Fal
     _initialize_tracer_provider()
 
 
-def get_bridged_tracer_provider() -> TracerProvider:
+def get_bridged_tracer_provider() -> trace.TracerProvider:
     """
     Return the OpenTelemetry ``TracerProvider`` that MLflow uses to generate traces.
 
@@ -621,7 +643,7 @@ def _get_trace_exporter():
     return None
 
 
-def _initialize_tracer_provider(disabled=False):
+def _initialize_tracer_provider(disabled: bool = False) -> None:
     """
     Instantiate a tracer provider and set it as the global tracer provider.
 
@@ -716,7 +738,7 @@ def _parse_otel_resource_attributes(otel_resource_attributes: str | None) -> dic
     """
     Parse the otel resource attributes from a comma separated key-value pairs string.
     """
-    attributes = {}
+    attributes: dict[str, Any] = {}
     if not otel_resource_attributes:
         return attributes
 
@@ -782,7 +804,8 @@ def _resolve_experiment_uc_location() -> UnityCatalog | None:
         if not experiment:
             return None
 
-        return experiment.trace_location
+        trace_location: UnityCatalog | None = experiment.trace_location
+        return trace_location
     except Exception:
         _logger.debug(
             "Failed to auto-resolve UC location for active experiment",
@@ -804,7 +827,7 @@ def _get_span_processors(disabled: bool = False) -> list[SpanProcessor]:
     if disabled:
         return []
 
-    processors = []
+    processors: list[SpanProcessor] = []
 
     # TODO: Update this logic to pluggable registry where
     #  1. Partners can implement span processor/exporter and destination class.
@@ -833,8 +856,8 @@ def _get_span_processors(disabled: bool = False) -> list[SpanProcessor]:
                 uc_tracking_uri and is_databricks_uri(uc_tracking_uri)
             ):
                 uc_tracking_uri = "databricks"
-            exporter = DatabricksUCTableSpanExporter(tracking_uri=uc_tracking_uri)
-            processor = DatabricksUCTableSpanProcessor(span_exporter=exporter)
+            exporter: SpanExporter = DatabricksUCTableSpanExporter(tracking_uri=uc_tracking_uri)
+            processor: SpanProcessor = DatabricksUCTableSpanProcessor(span_exporter=exporter)
             processors.append(processor)
             _logger.debug("Added DatabricksUCTableSpanProcessor based on trace destination")
 

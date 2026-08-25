@@ -45,7 +45,9 @@ class TraceFilterCorrelationResult(_MlflowObject):
     confidence_upper: float | None = None
 
     @classmethod
-    def from_proto(cls, proto):
+    def from_proto(
+        cls, proto: CalculateTraceFilterCorrelation.Response
+    ) -> "TraceFilterCorrelationResult":
         """
         Create a TraceFilterCorrelationResult from a protobuf response.
 
@@ -64,7 +66,7 @@ class TraceFilterCorrelationResult(_MlflowObject):
             total_count=proto.total_count,
         )
 
-    def to_proto(self):
+    def to_proto(self) -> CalculateTraceFilterCorrelation.Response:
         """
         Convert this result to a protobuf response message.
 

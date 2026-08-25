@@ -57,7 +57,7 @@ IFRAME_HTML = """
 """
 
 
-def get_notebook_iframe_html(traces: list["Trace"]):
+def get_notebook_iframe_html(traces: list["Trace"]) -> str:
     """Build notebook iframe HTML for rendering traces from an HTTP tracking server.
 
     Callers must only invoke this when the effective base URL is HTTP(S):
@@ -110,7 +110,7 @@ def _is_jupyter():
         return False
 
 
-def is_using_tracking_server():
+def is_using_tracking_server() -> bool:
     return is_http_uri(mlflow.get_tracking_uri())
 
 

@@ -1,10 +1,13 @@
+from __future__ import annotations
+
 import contextlib
 import logging
 import threading
+from collections.abc import MutableMapping
 from dataclasses import dataclass, field
 from typing import Generator, Sequence
 
-from mlflow.entities import LiveSpan, Trace, TraceData, TraceInfo
+from mlflow.entities import LiveSpan, Span, Trace, TraceData, TraceInfo
 from mlflow.entities.model_registry import PromptVersion
 from mlflow.environment_variables import MLFLOW_TRACE_TIMEOUT_SECONDS
 from mlflow.tracing.constant import TraceTagKey
@@ -60,25 +63,28 @@ class InMemoryTraceManager:
     """
 
     _instance_lock = threading.RLock()
-    _instance = None
+    _instance: InMemoryTraceManager | None = None
 
     @classmethod
-    def get_instance(cls):
+    def get_instance(cls) -> InMemoryTraceManager:
         if cls._instance is None:
             with cls._instance_lock:
                 if cls._instance is None:
                     cls._instance = InMemoryTraceManager()
         return cls._instance
 
-    def __init__(self):
+    def __init__(self) -> None:
         # In-memory cache to store trace_od -> _Trace mapping.
-        self._traces = get_trace_cache_with_timeout()
+        # The cache (a `cachetools.Cache` variant) behaves as a string-keyed mapping of traces.
+        self._traces: MutableMapping[str, _Trace] = get_trace_cache_with_timeout()
 
         # Store mapping between OpenTelemetry trace ID and MLflow trace ID
         self._otel_id_to_mlflow_trace_id: dict[int, str] = {}
         self._lock = threading.RLock()  # Lock for _traces
 
-    def register_trace(self, otel_trace_id: int, trace_info: TraceInfo, is_remote_trace=False):
+    def register_trace(
+        self, otel_trace_id: int, trace_info: TraceInfo, is_remote_trace: bool = False
+    ) -> None:
         """
         Register a new trace info object to the in-memory trace registry.
 
@@ -99,9 +105,12 @@ class InMemoryTraceManager:
             )
             self._otel_id_to_mlflow_trace_id[otel_trace_id] = trace_info.trace_id
 
-    def register_span(self, span: LiveSpan):
+    def register_span(self, span: Span) -> None:
         """
         Store the given span in the in-memory trace data.
+
+        Only live spans are stored; other span objects (e.g. no-op or immutable spans)
+        are skipped.
 
         Args:
             span: The span to be stored.
@@ -114,7 +123,7 @@ class InMemoryTraceManager:
             trace_data_dict = self._traces[span.request_id].span_dict
             trace_data_dict[span.span_id] = span
 
-    def register_prompt(self, trace_id: str, prompt: PromptVersion):
+    def register_prompt(self, trace_id: str, prompt: PromptVersion) -> None:
         """
         Register a prompt to link to the trace with the given trace ID.
 
@@ -154,7 +163,7 @@ class InMemoryTraceManager:
 
         return trace.span_dict.get(span_id) if trace else None
 
-    def get_root_span_id(self, trace_id) -> str | None:
+    def get_root_span_id(self, trace_id: str) -> str | None:
         """
         Get the root span ID for the given trace ID.
         """
@@ -184,7 +193,7 @@ class InMemoryTraceManager:
                 return False
             return any(span.end_time_ns is None for span in trace.span_dict.values())
 
-    def set_trace_metadata(self, trace_id: str, key: str, value: str):
+    def set_trace_metadata(self, trace_id: str, key: str, value: str) -> None:
         """
         Set the trace metadata for the given request ID.
         """
@@ -209,7 +218,7 @@ class InMemoryTraceManager:
                 workspace=internal_trace.workspace,
             )
 
-    def _check_timeout_update(self):
+    def _check_timeout_update(self) -> None:
         """
         TTL/Timeout may be updated by users after initial cache creation. This method checks
         for the update and create a new cache instance with the updated timeout.
@@ -229,7 +238,7 @@ class InMemoryTraceManager:
                     self._traces = get_trace_cache_with_timeout()
 
     @classmethod
-    def reset(cls):
+    def reset(cls) -> None:
         """Clear all the aggregated trace data. This should only be used for testing."""
         if cls._instance:
             with cls._instance._lock:

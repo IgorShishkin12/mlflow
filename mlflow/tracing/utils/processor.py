@@ -1,11 +1,15 @@
 import logging
+from typing import TYPE_CHECKING, Any
 
 from mlflow.exceptions import MlflowException
+
+if TYPE_CHECKING:
+    from mlflow.entities.span import LiveSpan
 
 _logger = logging.getLogger(__name__)
 
 
-def apply_span_processors(span):
+def apply_span_processors(span: "LiveSpan") -> None:
     """Apply configured span processors sequentially to the span."""
     from mlflow.tracing.config import get_config
 
@@ -32,7 +36,7 @@ def apply_span_processors(span):
         )
 
 
-def validate_span_processors(span_processors):
+def validate_span_processors(span_processors: list[Any] | None) -> list[Any]:
     """Validate that the span processor is a valid function."""
     span_processors = span_processors or []
 

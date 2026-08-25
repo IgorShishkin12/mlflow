@@ -22,9 +22,11 @@ _logger = logging.getLogger(__name__)
 
 
 class UserTraceDestinationRegistry:
-    def __init__(self):
-        self._global_value = None
-        self._context_local_value = ContextVar("mlflow_trace_destination", default=None)
+    def __init__(self) -> None:
+        self._global_value: TraceLocationBase | None = None
+        self._context_local_value = ContextVar[TraceLocationBase | None](
+            "mlflow_trace_destination", default=None
+        )
 
     def get(self) -> TraceLocationBase | None:
         # Precedence: context-local -> global -> env.
@@ -34,13 +36,21 @@ class UserTraceDestinationRegistry:
             return self._global_value
         return self._get_trace_location_from_env()
 
-    def set(self, value, context_local: bool = False):
+    def set(self, value: TraceLocationBase | None, context_local: bool = False) -> None:
+        """
+        Set the destination to use, or ``None`` to clear the current override.
+
+        Args:
+            value: The trace location to set, or None if the resolved location is unset.
+            context_local: If True, the destination is only effective in the current
+                execution context; otherwise it is set globally.
+        """
         if context_local:
             self._context_local_value.set(value)
         else:
             self._global_value = value
 
-    def reset(self):
+    def reset(self) -> None:
         self._global_value = None
         self._context_local_value.set(None)
 
@@ -140,7 +150,7 @@ class Databricks(TraceDestination):
     experiment_id: str | None = None
     experiment_name: str | None = None
 
-    def __post_init__(self):
+    def __post_init__(self) -> None:
         if self.experiment_id is not None:
             self.experiment_id = str(self.experiment_id)
 

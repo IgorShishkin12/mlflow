@@ -6,17 +6,22 @@ import json
 import logging
 import uuid
 from collections import defaultdict
+from collections.abc import Iterable, Sequence
 from contextlib import contextmanager
 from dataclasses import dataclass, fields, is_dataclass
 from functools import lru_cache
-from typing import TYPE_CHECKING, Any, Generator
+from typing import TYPE_CHECKING, Any, Generator, TypeVar, cast
 
 import pydantic
 from opentelemetry import trace as trace_api
 from opentelemetry.sdk.trace import ReadableSpan as OTelReadableSpan
 from opentelemetry.sdk.trace import Span as OTelSpan
 
-from mlflow.exceptions import BAD_REQUEST, MlflowException, MlflowTracingException
+from mlflow.exceptions import MlflowException, MlflowTracingException
+
+# NB: Imported from its defining module rather than `mlflow.exceptions` (which re-exports it
+# without declaring it in `__all__`) so strict mode accepts the import.
+from mlflow.protos.databricks_pb2 import BAD_REQUEST
 from mlflow.tracing.constant import (
     ASSESSMENT_ID_PREFIX,
     TRACE_ID_V4_PREFIX,
@@ -176,14 +181,16 @@ def decode_id(span_or_trace_id: str) -> int:
     return int(span_or_trace_id, 16)
 
 
-def get_mlflow_span_for_otel_span(span: OTelSpan) -> LiveSpan | None:
+def get_mlflow_span_for_otel_span(span: OTelSpan | OTelReadableSpan) -> LiveSpan | None:
     """
     Get the active MLflow span for the given OpenTelemetry span.
     """
     from mlflow.tracing.trace_manager import InMemoryTraceManager
 
     trace_id = get_otel_attribute(span, SpanAttributeKey.REQUEST_ID)
-    mlflow_span_id = encode_span_id(span.get_span_context().span_id)
+    # NB: OTel declares `ReadableSpan.get_span_context()` as optional, but every span passed
+    # here carries a valid context (recording, ended, or non-recording alike).
+    mlflow_span_id = encode_span_id(cast("trace_api.SpanContext", span.get_span_context()).span_id)
     return InMemoryTraceManager.get_instance().get_span_from_id(trace_id, mlflow_span_id)
 
 
@@ -214,12 +221,15 @@ class SpanAggregationNode:
     data: dict[str, Any] | None
 
 
+_NumT = TypeVar("_NumT", bound=int | float)
+
+
 def _aggregate_from_nodes(
     nodes: list[SpanAggregationNode],
     keys: list[str],
-    default: int | float,
+    default: _NumT,
     optional_keys: list[str] | None = None,
-) -> dict[str, int | float] | None:
+) -> dict[str, _NumT] | None:
     """Generic aggregation of data from span nodes using DFS traversal.
 
     Avoids double-counting by skipping nodes whose ancestors already have the data.
@@ -245,7 +255,7 @@ def _aggregate_from_nodes(
     Returns:
         Aggregated dictionary with the keys, or None if no data found.
     """
-    totals: dict[str, int | float] = dict.fromkeys(keys, default)
+    totals: dict[str, _NumT] = dict.fromkeys(keys, default)
     has_data = False
 
     node_ids = {node.span_id for node in nodes}
@@ -273,7 +283,9 @@ def _aggregate_from_nodes(
         data = node.data
         node_has_data = data is not None
 
-        if node_has_data and not ancestor_has_data:
+        # NB: Guarded on `data` directly (not on `node_has_data`) so the type checker narrows
+        # `data` to a non-None dict inside the block. The two are interchangeable here.
+        if data is not None and not ancestor_has_data:
             for k in keys:
                 totals[k] += data.get(k, default)
             for k in optional_keys or []:
@@ -292,7 +304,7 @@ def _aggregate_from_nodes(
     return totals
 
 
-def _to_span_nodes(spans: list[LiveSpan], attribute_key: str) -> list[SpanAggregationNode]:
+def _to_span_nodes(spans: Iterable[LiveSpan], attribute_key: str) -> list[SpanAggregationNode]:
     return [
         SpanAggregationNode(
             span_id=span.span_id,
@@ -303,7 +315,7 @@ def _to_span_nodes(spans: list[LiveSpan], attribute_key: str) -> list[SpanAggreg
     ]
 
 
-def aggregate_usage_from_spans(spans: list[LiveSpan]) -> dict[str, int] | None:
+def aggregate_usage_from_spans(spans: Iterable[LiveSpan]) -> dict[str, int] | None:
     """Aggregate token usage information from all spans in the trace."""
     return aggregate_usage_from_span_nodes(_to_span_nodes(spans, SpanAttributeKey.CHAT_USAGE))
 
@@ -322,7 +334,7 @@ def aggregate_usage_from_span_nodes(nodes: list[SpanAggregationNode]) -> dict[st
     )
 
 
-def aggregate_cost_from_spans(spans: list[LiveSpan]) -> dict[str, float] | None:
+def aggregate_cost_from_spans(spans: Iterable[LiveSpan]) -> dict[str, float] | None:
     """Aggregate cost information from all spans in the trace."""
     return aggregate_cost_from_span_nodes(_to_span_nodes(spans, SpanAttributeKey.LLM_COST))
 
@@ -445,7 +457,7 @@ def calculate_cost_by_model_and_token_usage(
     }
 
 
-def get_otel_attribute(span: trace_api.Span, key: str) -> str | None:
+def get_otel_attribute(span: OTelSpan | OTelReadableSpan, key: str) -> Any:
     """
     Get the attribute value from the OpenTelemetry span in a decoded format.
 
@@ -458,21 +470,27 @@ def get_otel_attribute(span: trace_api.Span, key: str) -> str | None:
         be parsed, return None.
     """
     try:
-        attribute_value = span.attributes.get(key)
+        # NB: OTel types `attributes` as optional and its values as the full
+        # `AttributeValue` union, while the SDK guarantees the mapping is present and
+        # MLflow always stores values JSON-encoded via `dump_span_attribute_value`;
+        # non-decodable values fail `json.loads` and are handled by the handler below.
+        attribute_value = cast("dict[str, Any]", span.attributes).get(key)
         if attribute_value is None:
             return None
-        return json.loads(attribute_value)
+        return json.loads(cast("str", attribute_value))
     except Exception:
         _logger.debug(f"Failed to get attribute {key} with from span {span}.", exc_info=True)
 
+    return None
 
-def _try_get_prediction_context():
+
+def _try_get_prediction_context() -> Context | None:
     # NB: Tracing is enabled in mlflow-skinny, but the pyfunc module cannot be imported as it
     #     relies on numpy, which is not installed in skinny.
     try:
         from mlflow.pyfunc.context import get_prediction_context
     except (ImportError, KeyError):
-        return
+        return None
 
     return get_prediction_context()
 
@@ -514,13 +532,16 @@ def maybe_get_serving_request_id() -> str | None:
     from mlflow.tracing.processor.inference_table import _HEADER_REQUEST_ID_KEY, _get_flask_request
 
     if flask_request := _get_flask_request():
-        return flask_request.headers.get(_HEADER_REQUEST_ID_KEY)
+        header_request_id: str | None = flask_request.headers.get(_HEADER_REQUEST_ID_KEY)
+        return header_request_id
     return None
 
 
 def maybe_get_dependencies_schemas() -> dict[str, Any] | None:
     if context := _try_get_prediction_context():
         return context.dependencies_schemas
+
+    return None
 
 
 def maybe_get_logged_model_id() -> str | None:
@@ -529,6 +550,8 @@ def maybe_get_logged_model_id() -> str | None:
     """
     if context := _try_get_prediction_context():
         return context.model_id
+
+    return None
 
 
 def exclude_immutable_tags(tags: dict[str, str]) -> dict[str, str]:
@@ -694,7 +717,7 @@ def set_span_chat_tools(span: LiveSpan, tools: list[ChatTool]):
     span.set_attribute(SpanAttributeKey.CHAT_TOOLS, sanitized_tools)
 
 
-def _calculate_percentile(sorted_data: list[float], percentile: float) -> float:
+def _calculate_percentile(sorted_data: Sequence[int | float], percentile: float) -> float:
     """
     Calculate the percentile value from sorted data.
 
@@ -821,15 +844,19 @@ def get_experiment_id_for_trace(span: OTelReadableSpan) -> str:
     from mlflow.tracing.provider import _MLFLOW_TRACE_USER_DESTINATION
     from mlflow.tracking.fluent import _get_experiment_id, _get_latest_active_run
 
-    if experiment_id := get_otel_attribute(span, SpanAttributeKey.EXPERIMENT_ID):
-        return experiment_id
+    span_experiment_id: str | None = get_otel_attribute(span, SpanAttributeKey.EXPERIMENT_ID)
+    if span_experiment_id:
+        return span_experiment_id
 
     if destination := _MLFLOW_TRACE_USER_DESTINATION.get():
         if exp_id := getattr(destination, "experiment_id", None):
-            return exp_id
+            destination_experiment_id: str = exp_id
+            return destination_experiment_id
 
     if run := _get_latest_active_run():
-        return run.info.experiment_id
+        # NB: An active run always carries its experiment ID, despite the Optional annotation.
+        run_experiment_id: str = cast("str", run.info.experiment_id)
+        return run_experiment_id
 
     return _get_experiment_id()
 
@@ -941,7 +968,8 @@ def should_compute_cost_client_side() -> bool:
     from mlflow.tracking._tracking_service.utils import get_tracking_uri
     from mlflow.utils.uri import is_databricks_uri
 
-    return is_databricks_uri(get_tracking_uri())
+    is_databricks_backend: bool = is_databricks_uri(get_tracking_uri())
+    return is_databricks_backend
 
 
 def set_span_cost_attribute(span: LiveSpan) -> None:
