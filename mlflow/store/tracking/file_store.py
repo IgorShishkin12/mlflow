@@ -10,7 +10,7 @@ import time
 import uuid
 from collections import defaultdict
 from dataclasses import dataclass
-from typing import TYPE_CHECKING, Any, NamedTuple, TypedDict
+from typing import TYPE_CHECKING, Any, NamedTuple, NoReturn, TypedDict, cast
 
 from mlflow.entities import (
     Assessment,
@@ -41,6 +41,7 @@ from mlflow.entities import (
     ViewType,
     _DatasetSummary,
 )
+from mlflow.entities.assessment import ExpectationValue, FeedbackValue
 from mlflow.entities.lifecycle_stage import LifecycleStage
 from mlflow.entities.run_info import check_run_is_active
 from mlflow.entities.trace_info_v2 import TraceInfoV2
@@ -128,28 +129,32 @@ from mlflow.utils.yaml_utils import overwrite_yaml, read_yaml, write_yaml
 
 if TYPE_CHECKING:
     from mlflow.entities.model_registry.prompt_version import PromptVersion
+    from mlflow.models import Model
 
 _logger = logging.getLogger(__name__)
 
 
-def _default_root_dir():
-    return MLFLOW_TRACKING_DIR.get() or os.path.abspath(DEFAULT_LOCAL_FILE_AND_ARTIFACT_PATH)
+def _default_root_dir() -> str:
+    tracking_dir: str | None = MLFLOW_TRACKING_DIR.get()
+    return tracking_dir or os.path.abspath(DEFAULT_LOCAL_FILE_AND_ARTIFACT_PATH)
 
 
-def _read_persisted_experiment_dict(experiment_dict):
+def _read_persisted_experiment_dict(experiment_dict: dict[str, Any]) -> Experiment:
     dict_copy = experiment_dict.copy()
 
     # 'experiment_id' was changed from int to string, so we must cast to string
     # when reading legacy experiments
     if isinstance(dict_copy["experiment_id"], int):
         dict_copy["experiment_id"] = str(dict_copy["experiment_id"])
-    return Experiment.from_dictionary(dict_copy)
+    # The base ``_MlflowObject.from_dictionary`` returns the base type; the persisted dict
+    # describes an Experiment.
+    return cast(Experiment, Experiment.from_dictionary(dict_copy))
 
 
-def _make_persisted_run_info_dict(run_info):
+def _make_persisted_run_info_dict(run_info: RunInfo) -> dict[str, Any]:
     # 'tags' was moved from RunInfo to RunData, so we must keep storing it in the meta.yaml for
     # old mlflow versions to read
-    run_info_dict = dict(run_info)
+    run_info_dict: dict[str, Any] = dict(run_info)
     run_info_dict["tags"] = []
     if "status" in run_info_dict:
         # 'status' is stored as an integer enum in meta file, but RunInfo.status field is a string.
@@ -164,7 +169,7 @@ def _make_persisted_run_info_dict(run_info):
     return run_info_dict
 
 
-def _read_persisted_run_info_dict(run_info_dict):
+def _read_persisted_run_info_dict(run_info_dict: dict[str, Any]) -> RunInfo:
     dict_copy = run_info_dict.copy()
     if "lifecycle_stage" not in dict_copy:
         dict_copy["lifecycle_stage"] = LifecycleStage.ACTIVE
@@ -177,7 +182,9 @@ def _read_persisted_run_info_dict(run_info_dict):
     # when reading legacy run_infos
     if isinstance(dict_copy["experiment_id"], int):
         dict_copy["experiment_id"] = str(dict_copy["experiment_id"])
-    return RunInfo.from_dictionary(dict_copy)
+    # The base ``_MlflowObject.from_dictionary`` returns the base type; the persisted dict
+    # describes a RunInfo.
+    return cast(RunInfo, RunInfo.from_dictionary(dict_copy))
 
 
 class DatasetFilter(TypedDict, total=False):
@@ -216,7 +223,9 @@ class FileStore(AbstractStore):
         MODELS_FOLDER_NAME,
     ]
 
-    def __init__(self, root_directory=None, artifact_root_uri=None):
+    def __init__(
+        self, root_directory: str | None = None, artifact_root_uri: str | None = None
+    ) -> None:
         """
         Create a new FileStore with the given root directory and a given default artifact root URI.
         """
@@ -233,12 +242,13 @@ class FileStore(AbstractStore):
                 "workflow, set `MLFLOW_ALLOW_FILE_STORE=true` to opt out of this exception.",
                 error_code=INVALID_PARAMETER_VALUE,
             )
-        self.root_directory = local_file_uri_to_path(root_directory or _default_root_dir())
+        self.root_directory: str = local_file_uri_to_path(root_directory or _default_root_dir())
+        self.artifact_root_uri: str
         if not artifact_root_uri:
             self.artifact_root_uri = path_to_local_file_uri(self.root_directory)
         else:
             self.artifact_root_uri = resolve_uri_if_local(artifact_root_uri)
-        self.trash_folder = os.path.join(self.root_directory, FileStore.TRASH_FOLDER_NAME)
+        self.trash_folder: str = os.path.join(self.root_directory, FileStore.TRASH_FOLDER_NAME)
         # Create root directory if needed
         if not exists(self.root_directory):
             self._create_default_experiment()
@@ -246,7 +256,7 @@ class FileStore(AbstractStore):
         if not exists(self.trash_folder):
             mkdir(self.trash_folder)
 
-    def _create_default_experiment(self):
+    def _create_default_experiment(self) -> None:
         mkdir(self.root_directory)
         self._create_experiment_with_id(
             name=Experiment.DEFAULT_EXPERIMENT_NAME,
@@ -255,7 +265,7 @@ class FileStore(AbstractStore):
             tags=None,
         )
 
-    def _check_root_dir(self):
+    def _check_root_dir(self) -> None:
         """
         Run checks before running directory operations.
         """
@@ -264,14 +274,16 @@ class FileStore(AbstractStore):
         if not is_directory(self.root_directory):
             raise Exception(f"'{self.root_directory}' is not a directory.")
 
-    def _get_experiment_path(self, experiment_id, view_type=ViewType.ALL, assert_exists=False):
-        parents = []
+    def _get_experiment_path(
+        self, experiment_id: str, view_type: int = ViewType.ALL, assert_exists: bool = False
+    ) -> str | None:
+        parents: list[str] = []
         if view_type in (ViewType.ACTIVE_ONLY, ViewType.ALL):
             parents.append(self.root_directory)
         if view_type in (ViewType.DELETED_ONLY, ViewType.ALL):
             parents.append(self.trash_folder)
         for parent in parents:
-            exp_list = find(parent, experiment_id, full_path=True)
+            exp_list: list[str] = find(parent, experiment_id, full_path=True)
             if len(exp_list) > 0:
                 return exp_list[0]
         if assert_exists:
@@ -281,17 +293,22 @@ class FileStore(AbstractStore):
             )
         return None
 
-    def _get_run_dir(self, experiment_id, run_uuid):
+    def _get_run_dir(self, experiment_id: str, run_uuid: str) -> str | None:
         _validate_run_id(run_uuid)
         if not self._has_experiment(experiment_id):
             return None
-        return os.path.join(self._get_experiment_path(experiment_id, assert_exists=True), run_uuid)
+        # ``assert_exists=True`` raises unless the experiment directory is found.
+        experiment_dir: str = cast(
+            str, self._get_experiment_path(experiment_id, assert_exists=True)
+        )
+        return os.path.join(experiment_dir, run_uuid)
 
-    def _get_metric_path(self, experiment_id, run_uuid, metric_key):
+    def _get_metric_path(self, experiment_id: str, run_uuid: str, metric_key: str) -> str:
         _validate_run_id(run_uuid)
         _validate_metric_name(metric_key, "name")
         return os.path.join(
-            self._get_run_dir(experiment_id, run_uuid),
+            # The run directory exists whenever its metrics are written or read.
+            cast(str, self._get_run_dir(experiment_id, run_uuid)),
             FileStore.METRICS_FOLDER_NAME,
             metric_key,
         )
@@ -299,48 +316,58 @@ class FileStore(AbstractStore):
     def _get_model_metric_path(self, experiment_id: str, model_id: str, metric_key: str) -> str:
         _validate_metric_name(metric_key)
         return os.path.join(
-            self._get_model_dir(experiment_id, model_id), FileStore.METRICS_FOLDER_NAME, metric_key
+            # The model directory exists whenever its metrics are written or read.
+            cast(str, self._get_model_dir(experiment_id, model_id)),
+            FileStore.METRICS_FOLDER_NAME,
+            metric_key,
         )
 
-    def _get_param_path(self, experiment_id, run_uuid, param_name):
+    def _get_param_path(self, experiment_id: str, run_uuid: str, param_name: str) -> str:
         _validate_run_id(run_uuid)
         _validate_param_name(param_name)
         return os.path.join(
-            self._get_run_dir(experiment_id, run_uuid),
+            # The run directory exists whenever its params are written or read.
+            cast(str, self._get_run_dir(experiment_id, run_uuid)),
             FileStore.PARAMS_FOLDER_NAME,
             param_name,
         )
 
-    def _get_experiment_tag_path(self, experiment_id, tag_name):
+    def _get_experiment_tag_path(self, experiment_id: str, tag_name: str) -> str | None:
         _validate_experiment_id(experiment_id)
         _validate_tag_name(tag_name)
         if not self._has_experiment(experiment_id):
             return None
+        # ``assert_exists=True`` raises unless the directory is found.
+        experiment_dir: str = cast(
+            str, self._get_experiment_path(experiment_id, assert_exists=True)
+        )
         return os.path.join(
-            self._get_experiment_path(experiment_id, assert_exists=True),
+            experiment_dir,
             FileStore.TAGS_FOLDER_NAME,
             tag_name,
         )
 
-    def _get_tag_path(self, experiment_id, run_uuid, tag_name):
+    def _get_tag_path(self, experiment_id: str, run_uuid: str, tag_name: str) -> str:
         _validate_run_id(run_uuid)
         _validate_tag_name(tag_name)
         return os.path.join(
-            self._get_run_dir(experiment_id, run_uuid),
+            # The run directory exists whenever its tags are written or read.
+            cast(str, self._get_run_dir(experiment_id, run_uuid)),
             FileStore.TAGS_FOLDER_NAME,
             tag_name,
         )
 
-    def _get_artifact_dir(self, experiment_id, run_uuid):
+    def _get_artifact_dir(self, experiment_id: str, run_uuid: str) -> str:
         _validate_run_id(run_uuid)
-        return append_to_uri_path(
+        artifact_uri: str = append_to_uri_path(
             self.get_experiment(experiment_id).artifact_location,
             run_uuid,
             FileStore.ARTIFACTS_FOLDER_NAME,
         )
+        return artifact_uri
 
-    def _get_active_experiments(self, full_path=False):
-        exp_list = list_subdirs(self.root_directory, full_path)
+    def _get_active_experiments(self, full_path: bool = False) -> list[str]:
+        exp_list: list[str] = list_subdirs(self.root_directory, full_path)
         return [
             exp
             for exp in exp_list
@@ -348,17 +375,18 @@ class FileStore(AbstractStore):
             and exp != ModelRegistryFileStore.MODELS_FOLDER_NAME
         ]
 
-    def _get_deleted_experiments(self, full_path=False):
-        return list_subdirs(self.trash_folder, full_path)
+    def _get_deleted_experiments(self, full_path: bool = False) -> list[str]:
+        deleted_exps: list[str] = list_subdirs(self.trash_folder, full_path)
+        return deleted_exps
 
     def search_experiments(
         self,
-        view_type=ViewType.ACTIVE_ONLY,
-        max_results=SEARCH_MAX_RESULTS_DEFAULT,
-        filter_string=None,
-        order_by=None,
-        page_token=None,
-    ):
+        view_type: int = ViewType.ACTIVE_ONLY,
+        max_results: int = SEARCH_MAX_RESULTS_DEFAULT,
+        filter_string: str | None = None,
+        order_by: list[str] | None = None,
+        page_token: str | None = None,
+    ) -> PagedList[Experiment]:
         if not isinstance(max_results, int) or max_results < 1:
             raise MlflowException(
                 f"Invalid value {max_results} for parameter 'max_results' supplied. It must be "
@@ -373,13 +401,13 @@ class FileStore(AbstractStore):
             )
 
         self._check_root_dir()
-        experiment_ids = []
+        experiment_ids: list[str] = []
         if view_type in (ViewType.ACTIVE_ONLY, ViewType.ALL):
             experiment_ids += self._get_active_experiments(full_path=False)
         if view_type in (ViewType.DELETED_ONLY, ViewType.ALL):
             experiment_ids += self._get_deleted_experiments(full_path=False)
 
-        experiments = []
+        experiments: list[Experiment] = []
         for exp_id in experiment_ids:
             try:
                 # trap and warn known issues, will raise unexpected exceptions to caller
@@ -391,8 +419,8 @@ class FileStore(AbstractStore):
                     f"Malformed experiment '{exp_id}'. Detailed error {e}",
                     exc_info=True,
                 )
-        filtered = SearchExperimentsUtils.filter(experiments, filter_string)
-        sorted_experiments = SearchExperimentsUtils.sort(
+        filtered: list[Experiment] = SearchExperimentsUtils.filter(experiments, filter_string)
+        sorted_experiments: list[Experiment] = SearchExperimentsUtils.sort(
             filtered, order_by or ["creation_time DESC", "experiment_id ASC"]
         )
         experiments, next_page_token = SearchUtils.paginate(
@@ -400,8 +428,10 @@ class FileStore(AbstractStore):
         )
         return PagedList(experiments, next_page_token)
 
-    def get_experiment_by_name(self, experiment_name):
-        def pagination_wrapper_func(number_to_get, next_page_token):
+    def get_experiment_by_name(self, experiment_name: str) -> Experiment:
+        def pagination_wrapper_func(
+            number_to_get: int, next_page_token: str | None
+        ) -> PagedList[Experiment]:
             return self.search_experiments(
                 view_type=ViewType.ALL,
                 max_results=number_to_get,
@@ -409,14 +439,21 @@ class FileStore(AbstractStore):
                 page_token=next_page_token,
             )
 
-        experiments = get_results_from_paginated_fn(
+        experiments: list[Experiment] = get_results_from_paginated_fn(
             paginated_fn=pagination_wrapper_func,
             max_results_per_page=SEARCH_MAX_RESULTS_THRESHOLD,
             max_results=None,
         )
-        return experiments[0] if len(experiments) > 0 else None
+        # NB: Returns None when no experiment matches the name; callers treat None as "not found".
+        return cast(Experiment, experiments[0] if len(experiments) > 0 else None)
 
-    def _create_experiment_with_id(self, name, experiment_id, artifact_uri, tags):
+    def _create_experiment_with_id(
+        self,
+        name: str,
+        experiment_id: str,
+        artifact_uri: str | None,
+        tags: list[ExperimentTag] | None,
+    ) -> str:
         if not artifact_uri:
             resolved_artifact_uri = append_to_uri_path(self.artifact_root_uri, str(experiment_id))
         else:
@@ -441,7 +478,7 @@ class FileStore(AbstractStore):
                 self.set_experiment_tag(experiment_id, tag)
         return experiment_id
 
-    def _validate_experiment_does_not_exist(self, name):
+    def _validate_experiment_does_not_exist(self, name: str) -> None:
         experiment = self.get_experiment_by_name(name)
         if experiment is not None:
             if experiment.lifecycle_stage == LifecycleStage.DELETED:
@@ -458,7 +495,12 @@ class FileStore(AbstractStore):
                     databricks_pb2.RESOURCE_ALREADY_EXISTS,
                 )
 
-    def create_experiment(self, name, artifact_location=None, tags=None):
+    def create_experiment(
+        self,
+        name: str,
+        artifact_location: str | None = None,
+        tags: list[ExperimentTag] | None = None,
+    ) -> str:
         self._check_root_dir()
         _validate_experiment_name(name)
 
@@ -472,10 +514,12 @@ class FileStore(AbstractStore):
         experiment_id = _generate_unique_integer_id()
         return self._create_experiment_with_id(name, str(experiment_id), artifact_location, tags)
 
-    def _has_experiment(self, experiment_id):
+    def _has_experiment(self, experiment_id: str) -> bool:
         return self._get_experiment_path(experiment_id) is not None
 
-    def _get_experiment(self, experiment_id, view_type=ViewType.ALL):
+    def _get_experiment(
+        self, experiment_id: str, view_type: int = ViewType.ALL
+    ) -> Experiment | None:
         self._check_root_dir()
         _validate_experiment_id(experiment_id)
         experiment_dir = self._get_experiment_path(experiment_id, view_type)
@@ -504,7 +548,7 @@ class FileStore(AbstractStore):
             return None
         return experiment
 
-    def get_experiment(self, experiment_id):
+    def get_experiment(self, experiment_id: str) -> Experiment:
         """
         Fetch the experiment.
         Note: This API will search for active as well as deleted experiments.
@@ -524,7 +568,7 @@ class FileStore(AbstractStore):
             )
         return experiment
 
-    def delete_experiment(self, experiment_id):
+    def delete_experiment(self, experiment_id: str) -> None:
         if str(experiment_id) == str(FileStore.DEFAULT_EXPERIMENT_ID):
             raise MlflowException(
                 "Cannot delete the default experiment "
@@ -537,7 +581,7 @@ class FileStore(AbstractStore):
                 f"Could not find experiment with ID {experiment_id}",
                 databricks_pb2.RESOURCE_DOES_NOT_EXIST,
             )
-        experiment = self._get_experiment(experiment_id)
+        experiment = cast(Experiment, self._get_experiment(experiment_id))
         experiment._lifecycle_stage = LifecycleStage.DELETED
         deletion_time = get_current_time_millis()
         experiment._set_last_update_time(deletion_time)
@@ -556,15 +600,15 @@ class FileStore(AbstractStore):
         )
         mv(experiment_dir, self.trash_folder)
 
-    def _hard_delete_experiment(self, experiment_id):
+    def _hard_delete_experiment(self, experiment_id: str) -> None:
         """
         Permanently delete an experiment.
         This is used by the ``mlflow gc`` command line and is not intended to be used elsewhere.
         """
         experiment_dir = self._get_experiment_path(experiment_id, ViewType.DELETED_ONLY)
-        shutil.rmtree(experiment_dir)
+        shutil.rmtree(cast(str, experiment_dir))
 
-    def restore_experiment(self, experiment_id):
+    def restore_experiment(self, experiment_id: str) -> None:
         experiment_dir = self._get_experiment_path(experiment_id, ViewType.DELETED_ONLY)
         if experiment_dir is None:
             raise MlflowException(
@@ -579,7 +623,8 @@ class FileStore(AbstractStore):
                 databricks_pb2.RESOURCE_ALREADY_EXISTS,
             )
         mv(experiment_dir, self.root_directory)
-        experiment = self._get_experiment(experiment_id)
+        # The experiment directory was just moved back into the root, so it must resolve.
+        experiment = cast(Experiment, self._get_experiment(experiment_id))
         meta_dir = os.path.join(self.root_directory, experiment_id)
         experiment._lifecycle_stage = LifecycleStage.ACTIVE
         experiment._set_last_update_time(get_current_time_millis())
@@ -596,7 +641,7 @@ class FileStore(AbstractStore):
             data=dict(experiment),
         )
 
-    def rename_experiment(self, experiment_id, new_name):
+    def rename_experiment(self, experiment_id: str, new_name: str) -> None:
         _validate_experiment_name(new_name)
         meta_dir = os.path.join(self.root_directory, experiment_id)
         # if experiment is malformed, will raise error
@@ -620,7 +665,7 @@ class FileStore(AbstractStore):
             data=dict(experiment),
         )
 
-    def delete_run(self, run_id):
+    def delete_run(self, run_id: str) -> None:
         run_info = self._get_run_info(run_id)
         if run_info is None:
             raise MlflowException(
@@ -630,7 +675,7 @@ class FileStore(AbstractStore):
         new_info = run_info._copy_with_overrides(lifecycle_stage=LifecycleStage.DELETED)
         self._overwrite_run_info(new_info, deleted_time=get_current_time_millis())
 
-    def _hard_delete_run(self, run_id):
+    def _hard_delete_run(self, run_id: str) -> None:
         """
         Permanently delete a run (metadata and metrics, tags, parameters).
         This is used by the ``mlflow gc`` command line and is not intended to be used elsewhere.
@@ -639,9 +684,9 @@ class FileStore(AbstractStore):
         # by gc before calling this method. The run_id was already validated
         # by search_runs/get_run before reaching this point.
         _, run_dir = self._find_run_root(run_id, validate_structure=False)
-        shutil.rmtree(run_dir)
+        shutil.rmtree(cast(str, run_dir))
 
-    def _get_deleted_runs(self, older_than=0):
+    def _get_deleted_runs(self, older_than: int = 0) -> list[str]:
         """
         Get all deleted run ids.
 
@@ -665,7 +710,7 @@ class FileStore(AbstractStore):
 
         return deleted_run_ids
 
-    def restore_run(self, run_id):
+    def restore_run(self, run_id: str) -> None:
         run_info = self._get_run_info(run_id)
         if run_info is None:
             raise MlflowException(
@@ -675,16 +720,16 @@ class FileStore(AbstractStore):
         new_info = run_info._copy_with_overrides(lifecycle_stage=LifecycleStage.ACTIVE)
         self._overwrite_run_info(new_info, deleted_time=None)
 
-    def _find_experiment_folder(self, run_path):
+    def _find_experiment_folder(self, run_path: str) -> str:
         """
         Given a run path, return the parent directory for its experiment.
         """
-        parent = get_parent_dir(run_path)
+        parent: str = get_parent_dir(run_path)
         if os.path.basename(parent) == FileStore.TRASH_FOLDER_NAME:
-            return get_parent_dir(parent)
+            return cast(str, get_parent_dir(parent))
         return parent
 
-    def _is_valid_run_directory(self, run_dir):
+    def _is_valid_run_directory(self, run_dir: str) -> bool:
         # Defense in depth: ensure we're not inside an artifacts folder
         path_parts = os.path.normpath(run_dir).split(os.sep)
         if FileStore.ARTIFACTS_FOLDER_NAME in path_parts[:-1]:
@@ -697,12 +742,14 @@ class FileStore(AbstractStore):
         ]
         return all(is_directory(os.path.join(run_dir, subdir)) for subdir in required_subdirs)
 
-    def _find_run_root(self, run_uuid, validate_structure=True):
+    def _find_run_root(
+        self, run_uuid: str, validate_structure: bool = True
+    ) -> tuple[str | None, str | None]:
         _validate_run_id(run_uuid)
         self._check_root_dir()
         all_experiments = self._get_active_experiments(True) + self._get_deleted_experiments(True)
         for experiment_dir in all_experiments:
-            runs = find(experiment_dir, run_uuid, full_path=True)
+            runs: list[str] = find(experiment_dir, run_uuid, full_path=True)
             if len(runs) == 0:
                 continue
             run_dir = runs[0]
@@ -713,17 +760,32 @@ class FileStore(AbstractStore):
             return os.path.basename(os.path.abspath(experiment_dir)), run_dir
         return None, None
 
-    def update_run_info(self, run_id, run_status, end_time, run_name):
+    def update_run_info(
+        self,
+        run_id: str,
+        run_status: int | None,
+        end_time: int | None,
+        run_name: str | None,
+    ) -> RunInfo:
         _validate_run_id(run_id)
         run_info = self._get_run_info(run_id)
         check_run_is_active(run_info)
+        # ``RunInfo._copy_with_overrides`` accepts the proto enum value (its status
+        # param is ``str | int | None``) even though the field declares ``str``.
         new_info = run_info._copy_with_overrides(run_status, end_time, run_name=run_name)
         if run_name:
             self._set_run_tag(run_info, RunTag(MLFLOW_RUN_NAME, run_name))
         self._overwrite_run_info(new_info)
         return new_info
 
-    def create_run(self, experiment_id, user_id, start_time, tags, run_name):
+    def create_run(
+        self,
+        experiment_id: str,
+        user_id: str,
+        start_time: int,
+        tags: list[RunTag] | None,
+        run_name: str | None,
+    ) -> Run:
         """
         Creates a run with the specified attributes.
         """
@@ -777,7 +839,7 @@ class FileStore(AbstractStore):
             self.set_tag(run_uuid, tag)
         return self.get_run(run_id=run_uuid)
 
-    def get_run(self, run_id):
+    def get_run(self, run_id: str) -> Run:
         """
         Note: Will get both active and deleted runs.
         """
@@ -790,7 +852,7 @@ class FileStore(AbstractStore):
             )
         return self._get_run_from_info(run_info)
 
-    def _get_run_from_info(self, run_info):
+    def _get_run_from_info(self, run_info: RunInfo) -> Run:
         metrics = self._get_all_metrics(run_info)
         params = self._get_all_params(run_info)
         tags = self._get_all_tags(run_info)
@@ -801,7 +863,7 @@ class FileStore(AbstractStore):
                 run_info._set_run_name(run_name)
         return Run(run_info, RunData(metrics, params, tags), inputs, outputs)
 
-    def _get_run_info(self, run_uuid):
+    def _get_run_info(self, run_uuid: str) -> RunInfo:
         """
         Note: Will get both active and deleted runs.
         """
@@ -824,11 +886,11 @@ class FileStore(AbstractStore):
             )
         return run_info
 
-    def _get_run_info_from_dir(self, run_dir):
+    def _get_run_info_from_dir(self, run_dir: str) -> RunInfo:
         meta = FileStore._read_yaml(run_dir, FileStore.META_DATA_FILE_NAME)
-        return _read_persisted_run_info_dict(meta)
+        return _read_persisted_run_info_dict(cast(dict[str, Any], meta))
 
-    def _get_run_files(self, run_info, resource_type):
+    def _get_run_files(self, run_info: RunInfo, resource_type: str) -> tuple[str, list[str]]:
         run_dir = self._get_run_dir(run_info.experiment_id, run_info.run_id)
         # run_dir exists since run validity has been confirmed above.
         if resource_type == "metric":
@@ -839,18 +901,21 @@ class FileStore(AbstractStore):
             subfolder_name = FileStore.TAGS_FOLDER_NAME
         else:
             raise Exception("Looking for unknown resource under run.")
-        return self._get_resource_files(run_dir, subfolder_name)
+        return self._get_resource_files(cast(str, run_dir), subfolder_name)
 
-    def _get_experiment_files(self, experiment_id):
+    def _get_experiment_files(self, experiment_id: str) -> tuple[str, list[str]]:
         _validate_experiment_id(experiment_id)
-        experiment_dir = self._get_experiment_path(experiment_id, assert_exists=True)
+        # ``assert_exists=True`` raises unless the directory is found.
+        experiment_dir: str = cast(
+            str, self._get_experiment_path(experiment_id, assert_exists=True)
+        )
         return self._get_resource_files(experiment_dir, FileStore.EXPERIMENT_TAGS_FOLDER_NAME)
 
-    def _get_resource_files(self, root_dir, subfolder_name):
-        source_dirs = find(root_dir, subfolder_name, full_path=True)
+    def _get_resource_files(self, root_dir: str, subfolder_name: str) -> tuple[str, list[str]]:
+        source_dirs: list[str] = find(root_dir, subfolder_name, full_path=True)
         if len(source_dirs) == 0:
             return root_dir, []
-        file_names = []
+        file_names: list[str] = []
         for root, _, files in os.walk(source_dirs[0]):
             for name in files:
                 abspath = os.path.join(root, name)
@@ -882,12 +947,12 @@ class FileStore(AbstractStore):
         # https://docs.python.org/3/reference/expressions.html#value-comparisons
         return max(metric_objs, key=lambda m: (m.step, m.timestamp, m.value))
 
-    def get_all_metrics(self, run_uuid):
+    def get_all_metrics(self, run_uuid: str) -> list[Metric]:
         _validate_run_id(run_uuid)
         run_info = self._get_run_info(run_uuid)
         return self._get_all_metrics(run_info)
 
-    def _get_all_metrics(self, run_info):
+    def _get_all_metrics(self, run_info: RunInfo) -> list[Metric]:
         parent_path, metric_files = self._get_run_files(run_info, "metric")
         return [
             self._get_metric_from_file(
@@ -923,7 +988,13 @@ class FileStore(AbstractStore):
             run_id=run_id,
         )
 
-    def get_metric_history(self, run_id, metric_key, max_results=None, page_token=None):
+    def get_metric_history(
+        self,
+        run_id: str,
+        metric_key: str,
+        max_results: int | None = None,
+        page_token: str | None = None,
+    ) -> PagedList[Metric]:
         """
         Return all logged values for a given metric.
 
@@ -965,46 +1036,46 @@ class FileStore(AbstractStore):
         return PagedList(metrics, next_page_token)
 
     @staticmethod
-    def _get_param_from_file(parent_path, param_name):
+    def _get_param_from_file(parent_path: str, param_name: str) -> Param:
         _validate_param_name(param_name)
-        value = read_file(parent_path, param_name)
+        value: str = read_file(parent_path, param_name)
         return Param(param_name, value)
 
-    def get_all_params(self, run_uuid):
+    def get_all_params(self, run_uuid: str) -> list[Param]:
         _validate_run_id(run_uuid)
         run_info = self._get_run_info(run_uuid)
         return self._get_all_params(run_info)
 
-    def _get_all_params(self, run_info):
+    def _get_all_params(self, run_info: RunInfo) -> list[Param]:
         parent_path, param_files = self._get_run_files(run_info, "param")
         return [self._get_param_from_file(parent_path, param_file) for param_file in param_files]
 
     @staticmethod
-    def _get_experiment_tag_from_file(parent_path, tag_name):
+    def _get_experiment_tag_from_file(parent_path: str, tag_name: str) -> ExperimentTag:
         _validate_tag_name(tag_name)
-        tag_data = read_file(parent_path, tag_name)
+        tag_data: str = read_file(parent_path, tag_name)
         return ExperimentTag(tag_name, tag_data)
 
-    def get_all_experiment_tags(self, exp_id):
+    def get_all_experiment_tags(self, exp_id: str) -> list[ExperimentTag]:
         parent_path, tag_files = self._get_experiment_files(exp_id)
         return [self._get_experiment_tag_from_file(parent_path, tag_file) for tag_file in tag_files]
 
     @staticmethod
-    def _get_tag_from_file(parent_path, tag_name):
+    def _get_tag_from_file(parent_path: str, tag_name: str) -> RunTag:
         _validate_tag_name(tag_name)
-        tag_data = read_file(parent_path, tag_name)
+        tag_data: str = read_file(parent_path, tag_name)
         return RunTag(tag_name, tag_data)
 
-    def get_all_tags(self, run_uuid):
+    def get_all_tags(self, run_uuid: str) -> list[RunTag]:
         _validate_run_id(run_uuid)
         run_info = self._get_run_info(run_uuid)
         return self._get_all_tags(run_info)
 
-    def _get_all_tags(self, run_info):
+    def _get_all_tags(self, run_info: RunInfo) -> list[RunTag]:
         parent_path, tag_files = self._get_run_files(run_info, "tag")
         return [self._get_tag_from_file(parent_path, tag_file) for tag_file in tag_files]
 
-    def _list_run_infos(self, experiment_id, view_type):
+    def _list_run_infos(self, experiment_id: str, view_type: int) -> list[RunInfo]:
         self._check_root_dir()
         if not self._has_experiment(experiment_id):
             return []
@@ -1020,7 +1091,7 @@ class FileStore(AbstractStore):
             ),
             full_path=True,
         )
-        run_infos = []
+        run_infos: list[RunInfo] = []
         for r_dir in run_dirs:
             try:
                 # trap and warn known issues, will raise unexpected exceptions to caller
@@ -1052,29 +1123,29 @@ class FileStore(AbstractStore):
 
     def _search_runs(
         self,
-        experiment_ids,
-        filter_string,
-        run_view_type,
-        max_results,
-        order_by,
-        page_token,
-    ):
+        experiment_ids: list[str],
+        filter_string: str,
+        run_view_type: int,
+        max_results: int,
+        order_by: list[str] | None,
+        page_token: str | None,
+    ) -> tuple[list[Run], str | None]:
         if max_results > SEARCH_MAX_RESULTS_THRESHOLD:
             raise MlflowException(
                 "Invalid value for request parameter max_results. It must be at "
                 f"most {SEARCH_MAX_RESULTS_THRESHOLD}, but got value {max_results}",
                 databricks_pb2.INVALID_PARAMETER_VALUE,
             )
-        runs = []
+        runs: list[Run] = []
         for experiment_id in experiment_ids:
             run_infos = self._list_run_infos(experiment_id, run_view_type)
             runs.extend(self._get_run_from_info(r) for r in run_infos)
-        filtered = SearchUtils.filter(runs, filter_string)
-        sorted_runs = SearchUtils.sort(filtered, order_by)
+        filtered: list[Run] = SearchUtils.filter(runs, filter_string)
+        sorted_runs: list[Run] = SearchUtils.sort(filtered, order_by)
         runs, next_page_token = SearchUtils.paginate(sorted_runs, page_token, max_results)
         return runs, next_page_token
 
-    def log_metric(self, run_id: str, metric: Metric):
+    def log_metric(self, run_id: str, metric: Metric) -> None:
         _validate_run_id(run_id)
         _validate_metric(metric.key, metric.value, metric.timestamp, metric.step)
         run_info = self._get_run_info(run_id)
@@ -1088,7 +1159,7 @@ class FileStore(AbstractStore):
                 metric=metric,
             )
 
-    def _log_run_metric(self, run_info, metric):
+    def _log_run_metric(self, run_info: RunInfo, metric: Metric) -> None:
         metric_path = self._get_metric_path(run_info.experiment_id, run_info.run_id, metric.key)
         make_containing_dirs(metric_path)
         if metric.dataset_name is not None and metric.dataset_digest is not None:
@@ -1100,7 +1171,9 @@ class FileStore(AbstractStore):
         else:
             append_to(metric_path, f"{metric.timestamp} {metric.value} {metric.step}\n")
 
-    def _log_model_metric(self, experiment_id: str, model_id: str, run_id: str, metric: Metric):
+    def _log_model_metric(
+        self, experiment_id: str, model_id: str, run_id: str, metric: Metric
+    ) -> None:
         metric_path = self._get_model_metric_path(
             experiment_id=experiment_id, model_id=model_id, metric_key=metric.key
         )
@@ -1114,22 +1187,24 @@ class FileStore(AbstractStore):
         else:
             append_to(metric_path, f"{metric.timestamp} {metric.value} {metric.step} {run_id}\n")
 
-    def _writeable_value(self, tag_value):
+    def _writeable_value(self, tag_value: Any) -> str:
         if tag_value is None:
             return ""
         elif is_string_type(tag_value):
-            return tag_value
+            # ``is_string_type`` guarantees a string at runtime but returns Any.
+            writeable_value: str = tag_value
+            return writeable_value
         else:
             return str(tag_value)
 
-    def log_param(self, run_id, param):
+    def log_param(self, run_id: str, param: Param) -> None:
         _validate_run_id(run_id)
         param = _validate_param(param.key, param.value)
         run_info = self._get_run_info(run_id)
         check_run_is_active(run_info)
         self._log_run_param(run_info, param)
 
-    def _log_run_param(self, run_info, param):
+    def _log_run_param(self, run_info: RunInfo, param: Param) -> None:
         param_path = self._get_param_path(run_info.experiment_id, run_info.run_id, param.key)
         writeable_param_value = self._writeable_value(param.value)
         if os.path.exists(param_path):
@@ -1142,7 +1217,9 @@ class FileStore(AbstractStore):
         make_containing_dirs(param_path)
         write_to(param_path, writeable_param_value)
 
-    def _validate_new_param_value(self, param_path, param_key, run_id, new_value):
+    def _validate_new_param_value(
+        self, param_path: str, param_key: str, run_id: str, new_value: str
+    ) -> None:
         """
         When logging a parameter with a key that already exists, this function is used to
         enforce immutability by verifying that the specified parameter value matches the existing
@@ -1160,7 +1237,7 @@ class FileStore(AbstractStore):
                 databricks_pb2.INVALID_PARAMETER_VALUE,
             )
 
-    def set_experiment_tag(self, experiment_id, tag):
+    def set_experiment_tag(self, experiment_id: str, tag: ExperimentTag) -> None:
         """
         Set a tag for the specified experiment
 
@@ -1180,7 +1257,7 @@ class FileStore(AbstractStore):
         make_containing_dirs(tag_path)
         write_to(tag_path, self._writeable_value(tag.value))
 
-    def delete_experiment_tag(self, experiment_id, key):
+    def delete_experiment_tag(self, experiment_id: str, key: str) -> None:
         """
         Delete a tag from the specified experiment
 
@@ -1201,9 +1278,9 @@ class FileStore(AbstractStore):
                 f"No tag with name: {key} in experiment with id {experiment_id}",
                 error_code=RESOURCE_DOES_NOT_EXIST,
             )
-        os.remove(tag_path)
+        os.remove(cast(str, tag_path))
 
-    def set_tag(self, run_id, tag):
+    def set_tag(self, run_id: str, tag: RunTag) -> None:
         _validate_run_id(run_id)
         _validate_tag_name(tag.key)
         run_info = self._get_run_info(run_id)
@@ -1213,13 +1290,13 @@ class FileStore(AbstractStore):
             run_status = RunStatus.from_string(run_info.status)
             self.update_run_info(run_id, run_status, run_info.end_time, tag.value)
 
-    def _set_run_tag(self, run_info, tag):
+    def _set_run_tag(self, run_info: RunInfo, tag: RunTag) -> None:
         tag_path = self._get_tag_path(run_info.experiment_id, run_info.run_id, tag.key)
         make_containing_dirs(tag_path)
         # Don't add trailing newline
         write_to(tag_path, self._writeable_value(tag.value))
 
-    def delete_tag(self, run_id, key):
+    def delete_tag(self, run_id: str, key: str) -> None:
         """
         Delete a tag from a run. This is irreversible.
 
@@ -1238,14 +1315,20 @@ class FileStore(AbstractStore):
             )
         os.remove(tag_path)
 
-    def _overwrite_run_info(self, run_info, deleted_time=None):
+    def _overwrite_run_info(self, run_info: RunInfo, deleted_time: int | None = None) -> None:
         run_dir = self._get_run_dir(run_info.experiment_id, run_info.run_id)
         run_info_dict = _make_persisted_run_info_dict(run_info)
         if deleted_time is not None:
             run_info_dict["deleted_time"] = deleted_time
         write_yaml(run_dir, FileStore.META_DATA_FILE_NAME, run_info_dict, overwrite=True)
 
-    def log_batch(self, run_id, metrics, params, tags):
+    def log_batch(
+        self,
+        run_id: str,
+        metrics: list[Metric],
+        params: list[Param],
+        tags: list[RunTag],
+    ) -> None:
         _validate_run_id(run_id)
         metrics, params, tags = _validate_batch_log_data(metrics, params, tags)
         _validate_batch_log_limits(metrics, params, tags)
@@ -1272,9 +1355,11 @@ class FileStore(AbstractStore):
                     self.update_run_info(run_id, run_status, run_info.end_time, tag.value)
                 self._set_run_tag(run_info, tag)
         except Exception as e:
+            # ``MlflowException`` accepts the caught exception (it stringifies via
+            # str(message)), so wrapping preserves the previous message verbatim.
             raise MlflowException(e, INTERNAL_ERROR)
 
-    def record_logged_model(self, run_id, mlflow_model):
+    def record_logged_model(self, run_id: str, mlflow_model: "Model") -> None:
         from mlflow.models import Model
 
         if not isinstance(mlflow_model, Model):
@@ -1289,7 +1374,7 @@ class FileStore(AbstractStore):
         path = self._get_tag_path(run_info.experiment_id, run_info.run_id, MLFLOW_LOGGED_MODELS)
         if os.path.exists(path):
             with open(path) as f:
-                model_list = json.loads(f.read())
+                model_list: list[dict[str, Any]] = json.loads(f.read())
         else:
             model_list = []
         tag = RunTag(MLFLOW_LOGGED_MODELS, json.dumps(model_list + [model_dict]))
@@ -1297,6 +1382,7 @@ class FileStore(AbstractStore):
         try:
             self._set_run_tag(run_info, tag)
         except Exception as e:
+            # ``MlflowException`` accepts the caught exception; see ``log_batch``.
             raise MlflowException(e, INTERNAL_ERROR)
 
     def log_inputs(
@@ -1304,7 +1390,7 @@ class FileStore(AbstractStore):
         run_id: str,
         datasets: list[DatasetInput] | None = None,
         models: list[LoggedModelInput] | None = None,
-    ):
+    ) -> None:
         """
         Log inputs, such as datasets and models, to the specified run.
 
@@ -1325,8 +1411,12 @@ class FileStore(AbstractStore):
         if datasets is None and models is None:
             return
 
-        experiment_dir = self._get_experiment_path(run_info.experiment_id, assert_exists=True)
-        run_dir = self._get_run_dir(run_info.experiment_id, run_id)
+        # ``assert_exists=True`` raises unless the experiment directory is found; the run
+        # directory was resolved above by ``_get_run_info``.
+        experiment_dir: str = cast(
+            str, self._get_experiment_path(run_info.experiment_id, assert_exists=True)
+        )
+        run_dir: str = cast(str, self._get_run_dir(run_info.experiment_id, run_id))
 
         for dataset_input in datasets or []:
             dataset = dataset_input.dataset
@@ -1366,7 +1456,7 @@ class FileStore(AbstractStore):
                 )
                 fs_input.write_yaml(input_dir, FileStore.META_DATA_FILE_NAME)
 
-    def log_outputs(self, run_id: str, models: list[LoggedModelOutput]):
+    def log_outputs(self, run_id: str, models: list[LoggedModelOutput]) -> None:
         """
         Log outputs, such as models, to the specified run.
 
@@ -1385,7 +1475,8 @@ class FileStore(AbstractStore):
         if models is None:
             return
 
-        run_dir = self._get_run_dir(run_info.experiment_id, run_id)
+        # The run directory was resolved above by ``_get_run_info``.
+        run_dir: str = cast(str, self._get_run_dir(run_info.experiment_id, run_id))
 
         for model_output in models:
             model_id = model_output.model_id
@@ -1421,13 +1512,16 @@ class FileStore(AbstractStore):
         return md5.hexdigest()
 
     class _FileStoreInput(NamedTuple):
-        source_type: int
+        # Typed as the proto enum's ValueType (a NewType over int) because every writer
+        # stores `InputVertexType` constants / `.Value()` results and write_yaml passes
+        # them back to `InputVertexType.Name`.
+        source_type: InputVertexType.ValueType
         source_id: str
-        destination_type: int
+        destination_type: InputVertexType.ValueType
         destination_id: str
         tags: dict[str, str]
 
-        def write_yaml(self, root: str, file_name: str):
+        def write_yaml(self, root: str, file_name: str) -> None:
             dict_for_yaml = {
                 "source_type": InputVertexType.Name(self.source_type),
                 "source_id": self.source_id,
@@ -1438,8 +1532,10 @@ class FileStore(AbstractStore):
             write_yaml(root, file_name, dict_for_yaml)
 
         @classmethod
-        def from_yaml(cls, root, file_name):
-            dict_from_yaml = FileStore._read_yaml(root, file_name)
+        def from_yaml(cls, root: str, file_name: str) -> "FileStore._FileStoreInput":
+            dict_from_yaml: dict[str, Any] = cast(
+                dict[str, Any], FileStore._read_yaml(root, file_name)
+            )
             return cls(
                 source_type=InputVertexType.Value(dict_from_yaml["source_type"]),
                 source_id=dict_from_yaml["source_id"],
@@ -1449,14 +1545,15 @@ class FileStore(AbstractStore):
             )
 
     class _FileStoreOutput(NamedTuple):
-        source_type: int
+        # Same ValueType rationale as _FileStoreInput above.
+        source_type: OutputVertexType.ValueType
         source_id: str
-        destination_type: int
+        destination_type: OutputVertexType.ValueType
         destination_id: str
         tags: dict[str, str]
         step: int
 
-        def write_yaml(self, root: str, file_name: str):
+        def write_yaml(self, root: str, file_name: str) -> None:
             dict_for_yaml = {
                 "source_type": OutputVertexType.Name(self.source_type),
                 "source_id": self.source_id,
@@ -1468,8 +1565,10 @@ class FileStore(AbstractStore):
             write_yaml(root, file_name, dict_for_yaml)
 
         @classmethod
-        def from_yaml(cls, root, file_name):
-            dict_from_yaml = FileStore._read_yaml(root, file_name)
+        def from_yaml(cls, root: str, file_name: str) -> "FileStore._FileStoreOutput":
+            dict_from_yaml: dict[str, Any] = cast(
+                dict[str, Any], FileStore._read_yaml(root, file_name)
+            )
             return cls(
                 source_type=OutputVertexType.Value(dict_from_yaml["source_type"]),
                 source_id=dict_from_yaml["source_id"],
@@ -1480,12 +1579,15 @@ class FileStore(AbstractStore):
             )
 
     def _get_all_inputs(self, run_info: RunInfo) -> RunInputs:
-        run_dir = self._get_run_dir(run_info.experiment_id, run_info.run_id)
+        # The run directory exists because the run was resolved by the caller.
+        run_dir: str = cast(str, self._get_run_dir(run_info.experiment_id, run_info.run_id))
         inputs_parent_path = os.path.join(run_dir, FileStore.INPUTS_FOLDER_NAME)
         if not os.path.exists(inputs_parent_path):
             return RunInputs(dataset_inputs=[], model_inputs=[])
 
-        experiment_dir = self._get_experiment_path(run_info.experiment_id, assert_exists=True)
+        experiment_dir: str = cast(
+            str, self._get_experiment_path(run_info.experiment_id, assert_exists=True)
+        )
         dataset_inputs = self._get_dataset_inputs(run_info, inputs_parent_path, experiment_dir)
         model_inputs = self._get_model_inputs(inputs_parent_path, experiment_dir)
         return RunInputs(dataset_inputs=dataset_inputs, model_inputs=model_inputs)
@@ -1547,12 +1649,15 @@ class FileStore(AbstractStore):
         return model_inputs
 
     def _get_all_outputs(self, run_info: RunInfo) -> RunOutputs:
-        run_dir = self._get_run_dir(run_info.experiment_id, run_info.run_id)
+        # The run directory exists because the run was resolved by the caller.
+        run_dir: str = cast(str, self._get_run_dir(run_info.experiment_id, run_info.run_id))
         outputs_parent_path = os.path.join(run_dir, FileStore.OUTPUTS_FOLDER_NAME)
         if not os.path.exists(outputs_parent_path):
             return RunOutputs(model_outputs=[])
 
-        experiment_dir = self._get_experiment_path(run_info.experiment_id, assert_exists=True)
+        experiment_dir: str = cast(
+            str, self._get_experiment_path(run_info.experiment_id, assert_exists=True)
+        )
         model_outputs = self._get_model_outputs(outputs_parent_path, experiment_dir)
         return RunOutputs(model_outputs=model_outputs)
 
@@ -1573,7 +1678,7 @@ class FileStore(AbstractStore):
 
         return model_outputs
 
-    def _search_datasets(self, experiment_ids) -> list[_DatasetSummary]:
+    def _search_datasets(self, experiment_ids: list[str]) -> list[_DatasetSummary]:
         """
         Return all dataset summaries associated to the given experiments.
 
@@ -1590,7 +1695,8 @@ class FileStore(AbstractStore):
             experiment_id: str
             name: str
             digest: str
-            context: str
+            # ``context`` stays None when no MLFLOW_DATASET_CONTEXT tag was logged.
+            context: str | None
 
         MAX_DATASET_SUMMARIES_RESULTS = 1000
         summaries = set()
@@ -1643,14 +1749,18 @@ class FileStore(AbstractStore):
         ]
 
     @staticmethod
-    def _get_dataset_from_dir(parent_path, dataset_dir) -> Dataset:
-        dataset_dict = FileStore._read_yaml(
-            os.path.join(parent_path, dataset_dir), FileStore.META_DATA_FILE_NAME
+    def _get_dataset_from_dir(parent_path: str, dataset_dir: str) -> Dataset:
+        # The meta file is always present for a registered dataset directory.
+        dataset_dict: dict[str, Any] = cast(
+            dict[str, Any],
+            FileStore._read_yaml(
+                os.path.join(parent_path, dataset_dir), FileStore.META_DATA_FILE_NAME
+            ),
         )
-        return Dataset.from_dictionary(dataset_dict)
+        return cast(Dataset, Dataset.from_dictionary(dataset_dict))
 
     @staticmethod
-    def _read_yaml(root, file_name, retries=2):
+    def _read_yaml(root: str, file_name: str, retries: int = 2) -> dict[str, Any] | None:
         """
         Read data from yaml file and return as dictionary, retrying up to
         a specified number of times if the file contents are unexpectedly
@@ -1665,8 +1775,11 @@ class FileStore(AbstractStore):
             Data in yaml file as dictionary.
         """
 
-        def _read_helper(root, file_name, attempts_remaining=2):
-            result = read_yaml(root, file_name)
+        def _read_helper(
+            root: str, file_name: str, attempts_remaining: int = 2
+        ) -> dict[str, Any] | None:
+            # ``read_yaml`` yields ``None`` when the file exists but is empty.
+            result: dict[str, Any] | None = read_yaml(root, file_name)
             if result is not None or attempts_remaining == 0:
                 return result
             else:
@@ -1675,15 +1788,18 @@ class FileStore(AbstractStore):
 
         return _read_helper(root, file_name, attempts_remaining=retries)
 
-    def _get_traces_artifact_dir(self, experiment_id, trace_id):
-        return append_to_uri_path(
+    def _get_traces_artifact_dir(self, experiment_id: str, trace_id: str) -> str:
+        artifact_uri: str = append_to_uri_path(
             self.get_experiment(experiment_id).artifact_location,
             FileStore.TRACES_FOLDER_NAME,
             trace_id,
             FileStore.ARTIFACTS_FOLDER_NAME,
         )
+        return artifact_uri
 
-    def _save_trace_info(self, trace_info: TraceInfo, trace_dir, overwrite=False):
+    def _save_trace_info(
+        self, trace_info: TraceInfo, trace_dir: str, overwrite: bool = False
+    ) -> None:
         """
         TraceInfo is saved into `traces` folder under the experiment, each trace
         is saved in the folder named by its trace_id.
@@ -1724,7 +1840,7 @@ class FileStore(AbstractStore):
         for assessment in trace_info.assessments:
             self.create_assessment(assessment)
 
-    def _convert_trace_info_to_dict(self, trace_info: TraceInfo):
+    def _convert_trace_info_to_dict(self, trace_info: TraceInfo) -> dict[str, Any]:
         """
         Convert trace info to a dictionary for persistence.
         Drop request_metadata and tags as they're saved into separate files.
@@ -1734,7 +1850,9 @@ class FileStore(AbstractStore):
         trace_info_dict.pop("tags", None)
         return trace_info_dict
 
-    def _write_dict_to_trace_sub_folder(self, trace_dir, sub_folder, dictionary):
+    def _write_dict_to_trace_sub_folder(
+        self, trace_dir: str, sub_folder: str, dictionary: dict[str, str]
+    ) -> None:
         mkdir(trace_dir, sub_folder)
         for key, value in dictionary.items():
             # always validate as tag name to make sure the file name is valid
@@ -1743,9 +1861,9 @@ class FileStore(AbstractStore):
             # value are written as strings
             write_to(tag_path, self._writeable_value(value))
 
-    def _get_dict_from_trace_sub_folder(self, trace_dir, sub_folder):
+    def _get_dict_from_trace_sub_folder(self, trace_dir: str, sub_folder: str) -> dict[str, str]:
         parent_path, files = self._get_resource_files(trace_dir, sub_folder)
-        dictionary = {}
+        dictionary: dict[str, str] = {}
         for file_name in files:
             _validate_tag_name(file_name)
             value = read_file(parent_path, file_name)
@@ -1762,9 +1880,15 @@ class FileStore(AbstractStore):
         Returns:
             The created TraceInfo object from the backend.
         """
-        _validate_experiment_id(trace_info.experiment_id)
-        experiment_dir = self._get_experiment_path(
-            trace_info.experiment_id, view_type=ViewType.ACTIVE_ONLY, assert_exists=True
+        # A trace stored in an MLflow experiment always carries its experiment ID.
+        experiment_id: str = cast(str, trace_info.experiment_id)
+        _validate_experiment_id(experiment_id)
+        # ``assert_exists=True`` raises unless the directory is found.
+        experiment_dir: str = cast(
+            str,
+            self._get_experiment_path(
+                experiment_id, view_type=ViewType.ACTIVE_ONLY, assert_exists=True
+            ),
         )
 
         # Create traces directory structure
@@ -1774,7 +1898,7 @@ class FileStore(AbstractStore):
         trace_dir = os.path.join(traces_dir, trace_info.trace_id)
 
         # Add artifact location to tags
-        artifact_uri = self._get_traces_artifact_dir(trace_info.experiment_id, trace_info.trace_id)
+        artifact_uri = self._get_traces_artifact_dir(experiment_id, trace_info.trace_id)
         tags = dict(trace_info.tags)
         tags[MLFLOW_ARTIFACT_LOCATION] = artifact_uri
 
@@ -1796,33 +1920,39 @@ class FileStore(AbstractStore):
         return self._get_trace_info_and_dir(trace_id)[0]
 
     def _get_trace_info_and_dir(self, trace_id: str) -> tuple[TraceInfo, str]:
-        trace_dir = self._find_trace_dir(trace_id, assert_exists=True)
+        # ``assert_exists=True`` raises unless the directory is found.
+        trace_dir: str = cast(str, self._find_trace_dir(trace_id, assert_exists=True))
         trace_info = self._get_trace_info_from_dir(trace_dir)
         if trace_info and trace_info.trace_id != trace_id:
             raise MlflowException(
                 f"Trace with ID '{trace_id}' metadata is in invalid state.",
                 databricks_pb2.INVALID_STATE,
             )
-        return trace_info, trace_dir
+        # A trace directory without its info file yields a None info here.
+        return cast(TraceInfo, trace_info), trace_dir
 
-    def _find_trace_dir(self, trace_id, assert_exists=False):
+    def _find_trace_dir(self, trace_id: str, assert_exists: bool = False) -> str | None:
         self._check_root_dir()
         all_experiments = self._get_active_experiments(True) + self._get_deleted_experiments(True)
         for experiment_dir in all_experiments:
             traces_dir = os.path.join(experiment_dir, FileStore.TRACES_FOLDER_NAME)
             if exists(traces_dir):
-                if traces := find(traces_dir, trace_id, full_path=True):
+                traces: list[str] = find(traces_dir, trace_id, full_path=True)
+                if traces:
                     return traces[0]
         if assert_exists:
             raise MlflowException(
                 f"Trace with ID '{trace_id}' not found",
                 RESOURCE_DOES_NOT_EXIST,
             )
+        return None
 
-    def _get_trace_info_from_dir(self, trace_dir) -> TraceInfo | None:
+    def _get_trace_info_from_dir(self, trace_dir: str) -> TraceInfo | None:
         if not os.path.exists(os.path.join(trace_dir, FileStore.TRACE_INFO_FILE_NAME)):
             return None
-        trace_info_dict = FileStore._read_yaml(trace_dir, FileStore.TRACE_INFO_FILE_NAME)
+        trace_info_dict: dict[str, Any] = cast(
+            dict[str, Any], FileStore._read_yaml(trace_dir, FileStore.TRACE_INFO_FILE_NAME)
+        )
         trace_info = TraceInfo.from_dict(trace_info_dict)
         trace_info.trace_metadata = self._get_dict_from_trace_sub_folder(
             trace_dir, FileStore.TRACE_TRACE_METADATA_FOLDER_NAME
@@ -1833,7 +1963,7 @@ class FileStore(AbstractStore):
         trace_info.assessments = self._load_assessments(trace_info.trace_id)
         return trace_info
 
-    def set_trace_tag(self, trace_id: str, key: str, value: str):
+    def set_trace_tag(self, trace_id: str, key: str, value: str) -> None:
         """
         Set a tag on the trace with the given trace_id.
 
@@ -1842,12 +1972,13 @@ class FileStore(AbstractStore):
             key: The string key of the tag.
             value: The string value of the tag.
         """
-        trace_dir = self._find_trace_dir(trace_id, assert_exists=True)
+        # ``assert_exists=True`` raises unless the directory is found.
+        trace_dir: str = cast(str, self._find_trace_dir(trace_id, assert_exists=True))
         self._write_dict_to_trace_sub_folder(
             trace_dir, FileStore.TRACE_TAGS_FOLDER_NAME, {key: value}
         )
 
-    def delete_trace_tag(self, trace_id: str, key: str):
+    def delete_trace_tag(self, trace_id: str, key: str) -> None:
         """
         Delete a tag on the trace with the given trace_id.
 
@@ -1856,7 +1987,8 @@ class FileStore(AbstractStore):
             key: The string key of the tag.
         """
         _validate_tag_name(key)
-        trace_dir = self._find_trace_dir(trace_id, assert_exists=True)
+        # ``assert_exists=True`` raises unless the directory is found.
+        trace_dir: str = cast(str, self._find_trace_dir(trace_id, assert_exists=True))
         tag_path = os.path.join(trace_dir, FileStore.TRACE_TAGS_FOLDER_NAME, key)
         if not exists(tag_path):
             raise MlflowException(
@@ -1866,7 +1998,8 @@ class FileStore(AbstractStore):
         os.remove(tag_path)
 
     def _get_assessments_dir(self, trace_id: str) -> str:
-        trace_dir = self._find_trace_dir(trace_id, assert_exists=True)
+        # ``assert_exists=True`` raises unless the directory is found.
+        trace_dir: str = cast(str, self._find_trace_dir(trace_id, assert_exists=True))
         return os.path.join(trace_dir, FileStore.ASSESSMENTS_FOLDER_NAME)
 
     def _get_assessment_path(self, trace_id: str, assessment_id: str) -> str:
@@ -1874,7 +2007,10 @@ class FileStore(AbstractStore):
         return os.path.join(assessments_dir, f"{assessment_id}.yaml")
 
     def _save_assessment(self, assessment: Assessment) -> None:
-        assessment_path = self._get_assessment_path(assessment.trace_id, assessment.assessment_id)
+        # Persisted assessments always carry a trace ID and a generated assessment ID.
+        assessment_path = self._get_assessment_path(
+            cast(str, assessment.trace_id), cast(str, assessment.assessment_id)
+        )
         make_containing_dirs(assessment_path)
 
         assessment_dict = assessment.to_dictionary()
@@ -1905,8 +2041,13 @@ class FileStore(AbstractStore):
             )
 
         try:
-            assessment_dict = FileStore._read_yaml(
-                root=os.path.dirname(assessment_path), file_name=os.path.basename(assessment_path)
+            # The meta file is always present for an existing assessment path.
+            assessment_dict: dict[str, Any] = cast(
+                dict[str, Any],
+                FileStore._read_yaml(
+                    root=os.path.dirname(assessment_path),
+                    file_name=os.path.basename(assessment_path),
+                ),
             )
             return Assessment.from_dictionary(assessment_dict)
         except Exception as e:
@@ -1958,7 +2099,10 @@ class FileStore(AbstractStore):
         assessment.valid = True
 
         if assessment.overrides:
-            original_assessment = self.get_assessment(assessment.trace_id, assessment.overrides)
+            # Overridden assessments always carry a trace ID; ``overrides`` is narrowed above.
+            original_assessment = self.get_assessment(
+                cast(str, assessment.trace_id), assessment.overrides
+            )
             original_assessment.valid = False
             self._save_assessment(original_assessment)
 
@@ -1970,8 +2114,8 @@ class FileStore(AbstractStore):
         trace_id: str,
         assessment_id: str,
         name: str | None = None,
-        expectation: Expectation | None = None,
-        feedback: Feedback | None = None,
+        expectation: ExpectationValue | None = None,
+        feedback: FeedbackValue | None = None,
         rationale: str | None = None,
         metadata: dict[str, str] | None = None,
     ) -> Assessment:
@@ -2023,6 +2167,7 @@ class FileStore(AbstractStore):
 
         updated_timestamp = int(time.time() * 1000)
 
+        updated_assessment: Assessment
         if isinstance(existing_assessment, Expectation):
             new_value = expectation.value if expectation is not None else existing_assessment.value
 
@@ -2041,8 +2186,10 @@ class FileStore(AbstractStore):
                 new_value = feedback.value
                 new_error = feedback.error
             else:
-                new_value = existing_assessment.value
-                new_error = existing_assessment.error
+                # Not an ``Expectation`` here, so the stored value/error live on Feedback.
+                feedback_assessment = cast(Feedback, existing_assessment)
+                new_value = feedback_assessment.value
+                new_error = feedback_assessment.error
 
             updated_assessment = Feedback(
                 name=name if name is not None else existing_assessment.name,
@@ -2125,7 +2272,10 @@ class FileStore(AbstractStore):
             except MlflowException:
                 pass
 
-    def _delete_traces(
+    # NB: falls through returning None when neither criterion is given — unreachable via
+    # the validating public API; mypy cannot prove branch totality. The None fall-through
+    # itself is pre-existing latent behavior (fix-branch material), not introduced here.
+    def _delete_traces(  # type: ignore[return]
         self,
         experiment_id: str,
         max_timestamp_millis: int | None = None,
@@ -2150,7 +2300,9 @@ class FileStore(AbstractStore):
         Returns:
             The number of traces deleted.
         """
-        experiment_path = self._get_experiment_path(experiment_id, assert_exists=True)
+        experiment_path: str = cast(
+            str, self._get_experiment_path(experiment_id, assert_exists=True)
+        )
         traces_path = os.path.join(experiment_path, FileStore.TRACES_FOLDER_NAME)
         deleted_traces = 0
         if max_timestamp_millis is not None:
@@ -2225,17 +2377,21 @@ class FileStore(AbstractStore):
                 f"most {SEARCH_MAX_RESULTS_THRESHOLD}, but got value {max_results}",
                 INVALID_PARAMETER_VALUE,
             )
-        traces = []
-        for experiment_id in locations:
+        traces: list[TraceInfo] = []
+        # Callers always scope the search to at least one experiment, so ``locations`` is
+        # non-empty here despite the helper's Optional return type.
+        for experiment_id in cast(list[str], locations):
             trace_infos = self._list_trace_infos(experiment_id)
             traces.extend(trace_infos)
-        filtered = SearchTraceUtils.filter(traces, filter_string)
-        sorted_traces = SearchTraceUtils.sort(filtered, order_by)
+        filtered: list[TraceInfo] = SearchTraceUtils.filter(traces, filter_string)
+        sorted_traces: list[TraceInfo] = SearchTraceUtils.sort(filtered, order_by)
         traces, next_page_token = SearchTraceUtils.paginate(sorted_traces, page_token, max_results)
         return traces, next_page_token
 
-    def _list_trace_infos(self, experiment_id):
-        experiment_path = self._get_experiment_path(experiment_id, assert_exists=True)
+    def _list_trace_infos(self, experiment_id: str) -> list[TraceInfo]:
+        experiment_path: str = cast(
+            str, self._get_experiment_path(experiment_id, assert_exists=True)
+        )
         traces_path = os.path.join(experiment_path, FileStore.TRACES_FOLDER_NAME)
         if not os.path.exists(traces_path):
             return []
@@ -2324,7 +2480,7 @@ class FileStore(AbstractStore):
 
         return self.get_logged_model(model_id=model_id)
 
-    def log_logged_model_params(self, model_id: str, params: list[LoggedModelParameter]):
+    def log_logged_model_params(self, model_id: str, params: list[LoggedModelParameter]) -> None:
         """
         Set parameters on the specified logged model.
 
@@ -2341,7 +2497,8 @@ class FileStore(AbstractStore):
         model = self.get_logged_model(model_id)
         for param in params:
             param_path = os.path.join(
-                self._get_model_dir(model.experiment_id, model.model_id),
+                # The model was just resolved, so its directory exists.
+                cast(str, self._get_model_dir(model.experiment_id, model.model_id)),
                 FileStore.PARAMS_FOLDER_NAME,
                 param.key,
             )
@@ -2361,7 +2518,8 @@ class FileStore(AbstractStore):
             The updated model.
         """
         model_dict = self._get_model_dict(model_id)
-        model = LoggedModel.from_dictionary(model_dict)
+        # The persisted dict describes a LoggedModel; ``from_dictionary`` loses the subtype.
+        model = cast(LoggedModel, LoggedModel.from_dictionary(model_dict))
         model.status = status
         model.last_updated_timestamp = int(time.time() * 1000)
         model_dir = self._get_model_dir(model.experiment_id, model.model_id)
@@ -2384,7 +2542,8 @@ class FileStore(AbstractStore):
         for tag in tags:
             _validate_tag_name(tag.key)
             tag_path = os.path.join(
-                self._get_model_dir(model.experiment_id, model.model_id),
+                # The model was just resolved, so its directory exists.
+                cast(str, self._get_model_dir(model.experiment_id, model.model_id)),
                 FileStore.TAGS_FOLDER_NAME,
                 tag.key,
             )
@@ -2406,7 +2565,8 @@ class FileStore(AbstractStore):
         _validate_tag_name(key)
         model = self.get_logged_model(model_id)
         tag_path = os.path.join(
-            self._get_model_dir(model.experiment_id, model.model_id),
+            # The model was just resolved, so its directory exists.
+            cast(str, self._get_model_dir(model.experiment_id, model.model_id)),
             FileStore.TAGS_FOLDER_NAME,
             key,
         )
@@ -2430,7 +2590,8 @@ class FileStore(AbstractStore):
             The fetched model.
         """
         if not allow_deleted:
-            return LoggedModel.from_dictionary(self._get_model_dict(model_id))
+            # The persisted dict describes a LoggedModel; ``from_dictionary`` loses the subtype.
+            return cast(LoggedModel, LoggedModel.from_dictionary(self._get_model_dict(model_id)))
 
         exp_id, model_dir = self._find_model_root(model_id)
         if model_dir is None:
@@ -2461,14 +2622,15 @@ class FileStore(AbstractStore):
     def _hard_delete_logged_model(self, model_id: str) -> None:
         model = self.get_logged_model(model_id, allow_deleted=True)
         model_dir = self._get_model_dir(model.experiment_id, model.model_id)
-        shutil.rmtree(model_dir)
+        # The model was just resolved, so its directory exists.
+        shutil.rmtree(cast(str, model_dir))
 
-    def _get_deleted_logged_models(self, older_than=0) -> list[str]:
+    def _get_deleted_logged_models(self, older_than: int = 0) -> list[str]:
         current_time = get_current_time_millis()
         experiment_ids = self._get_active_experiments(False) + self._get_deleted_experiments(False)
         deleted_models = []
         for exp_id in experiment_ids:
-            experiment_dir = self._get_experiment_path(exp_id, assert_exists=True)
+            experiment_dir: str = cast(str, self._get_experiment_path(exp_id, assert_exists=True))
             models_folder = os.path.join(experiment_dir, FileStore.MODELS_FOLDER_NAME)
             if not exists(models_folder):
                 continue
@@ -2496,12 +2658,13 @@ class FileStore(AbstractStore):
         return deleted_models
 
     def _get_model_artifact_dir(self, experiment_id: str, model_id: str) -> str:
-        return append_to_uri_path(
+        artifact_uri: str = append_to_uri_path(
             self.get_experiment(experiment_id).artifact_location,
             FileStore.MODELS_FOLDER_NAME,
             model_id,
             FileStore.ARTIFACTS_FOLDER_NAME,
         )
+        return artifact_uri
 
     def _make_persisted_model_dict(self, model: LoggedModel) -> dict[str, Any]:
         model_dict = model.to_dictionary()
@@ -2527,16 +2690,20 @@ class FileStore(AbstractStore):
             )
         return model_dict
 
-    def _get_model_dir(self, experiment_id: str, model_id: str) -> str:
+    def _get_model_dir(self, experiment_id: str, model_id: str) -> str | None:
         if not self._has_experiment(experiment_id):
             return None
+        # ``assert_exists=True`` raises unless the directory is found.
+        experiment_dir: str = cast(
+            str, self._get_experiment_path(experiment_id, assert_exists=True)
+        )
         return os.path.join(
-            self._get_experiment_path(experiment_id, assert_exists=True),
+            experiment_dir,
             FileStore.MODELS_FOLDER_NAME,
             model_id,
         )
 
-    def _find_model_root(self, model_id):
+    def _find_model_root(self, model_id: str) -> tuple[str | None, str | None]:
         self._check_root_dir()
         all_experiments = self._get_active_experiments(False) + self._get_deleted_experiments(False)
         for experiment_dir in all_experiments:
@@ -2545,17 +2712,23 @@ class FileStore(AbstractStore):
             )
             if not os.path.exists(models_dir_path):
                 continue
-            models = find(models_dir_path, model_id, full_path=True)
+            models: list[str] = find(models_dir_path, model_id, full_path=True)
             if len(models) == 0:
                 continue
             return os.path.basename(os.path.dirname(os.path.abspath(models_dir_path))), models[0]
         return None, None
 
     def _get_model_from_dir(self, model_dir: str) -> LoggedModel:
-        return LoggedModel.from_dictionary(self._get_model_info_from_dir(model_dir))
+        # The persisted dict describes a LoggedModel; ``from_dictionary`` loses the subtype.
+        return cast(
+            LoggedModel, LoggedModel.from_dictionary(self._get_model_info_from_dir(model_dir))
+        )
 
     def _get_model_info_from_dir(self, model_dir: str) -> dict[str, Any]:
-        model_dict = FileStore._read_yaml(model_dir, FileStore.META_DATA_FILE_NAME)
+        # The meta file is always present for an existing model directory.
+        model_dict: dict[str, Any] = cast(
+            dict[str, Any], FileStore._read_yaml(model_dir, FileStore.META_DATA_FILE_NAME)
+        )
         model_dict["tags"] = self._get_all_model_tags(model_dir)
         model_dict["params"] = {p.key: p.value for p in self._get_all_model_params(model_dir)}
         model_dict["metrics"] = self._get_all_model_metrics(
@@ -2565,11 +2738,20 @@ class FileStore(AbstractStore):
 
     def _get_all_model_tags(self, model_dir: str) -> list[LoggedModelTag]:
         parent_path, tag_files = self._get_resource_files(model_dir, FileStore.TAGS_FOLDER_NAME)
-        return [self._get_tag_from_file(parent_path, tag_file) for tag_file in tag_files]
+        # Model tags share the on-disk key/value format with run tags; the entities are
+        # interchangeable for the constructor that consumes them.
+        return [
+            cast(LoggedModelTag, self._get_tag_from_file(parent_path, tag_file))
+            for tag_file in tag_files
+        ]
 
     def _get_all_model_params(self, model_dir: str) -> list[LoggedModelParameter]:
         parent_path, param_files = self._get_resource_files(model_dir, FileStore.PARAMS_FOLDER_NAME)
-        return [self._get_param_from_file(parent_path, param_file) for param_file in param_files]
+        # Model params share the on-disk key/value format with run params.
+        return [
+            cast(LoggedModelParameter, self._get_param_from_file(parent_path, param_file))
+            for param_file in param_files
+        ]
 
     def _get_all_model_metrics(self, model_id: str, model_dir: str) -> list[Metric]:
         parent_path, metric_files = self._get_resource_files(
@@ -2639,7 +2821,7 @@ class FileStore(AbstractStore):
         self,
         experiment_ids: list[str],
         filter_string: str | None = None,
-        datasets: list[DatasetFilter] | None = None,
+        datasets: list[dict[str, Any]] | None = None,
         max_results: int | None = None,
         order_by: list[dict[str, Any]] | None = None,
         page_token: str | None = None,
@@ -2696,7 +2878,10 @@ class FileStore(AbstractStore):
         self._check_root_dir()
         if not self._has_experiment(experiment_id):
             return []
-        experiment_dir = self._get_experiment_path(experiment_id, assert_exists=True)
+        # ``assert_exists=True`` raises unless the directory is found.
+        experiment_dir: str = cast(
+            str, self._get_experiment_path(experiment_id, assert_exists=True)
+        )
         models_folder = os.path.join(experiment_dir, FileStore.MODELS_FOLDER_NAME)
         if not exists(models_folder):
             return []
@@ -2718,7 +2903,8 @@ class FileStore(AbstractStore):
                 m_dict = self._get_model_info_from_dir(m_dir)
                 if m_dict.get("lifecycle_stage") == LifecycleStage.DELETED:
                     continue
-                model = LoggedModel.from_dictionary(m_dict)
+                # The persisted dict describes a LoggedModel; ``from_dictionary`` loses the subtype.
+                model = cast(LoggedModel, LoggedModel.from_dictionary(m_dict))
                 if model.experiment_id != experiment_id:
                     logging.warning(
                         "Wrong experiment ID (%s) recorded for model '%s'. "
@@ -2766,8 +2952,12 @@ class FileStore(AbstractStore):
         """
         request_id = generate_request_id_v2()
         _validate_experiment_id(experiment_id)
-        experiment_dir = self._get_experiment_path(
-            experiment_id, view_type=ViewType.ACTIVE_ONLY, assert_exists=True
+        # ``assert_exists=True`` raises unless the directory is found.
+        experiment_dir: str = cast(
+            str,
+            self._get_experiment_path(
+                experiment_id, view_type=ViewType.ACTIVE_ONLY, assert_exists=True
+            ),
         )
         mkdir(experiment_dir, FileStore.TRACES_FOLDER_NAME)
         traces_dir = os.path.join(experiment_dir, FileStore.TRACES_FOLDER_NAME)
@@ -2821,58 +3011,61 @@ class FileStore(AbstractStore):
         self._save_trace_info(trace_info, trace_dir, overwrite=True)
         return TraceInfoV2.from_v3(trace_info)
 
-    # Evaluation Dataset APIs - Not supported in FileStore
+    # Evaluation Dataset APIs - Not supported in FileStore. Each decorated method raises
+    # unconditionally via ``filestore_not_supported``, hence ``NoReturn``.
 
     @filestore_not_supported
-    def create_dataset(
+    def create_dataset(  # type: ignore[empty-body]  # unreachable: @filestore_not_supported raises before entry
         self,
         name: str,
         tags: dict[str, Any] | None = None,
         experiment_ids: list[str] | None = None,
-    ):
+    ) -> NoReturn:
         pass
 
     @filestore_not_supported
-    def get_dataset(self, dataset_id):
+    def get_dataset(self, dataset_id: str) -> NoReturn:  # type: ignore[empty-body]  # unreachable: @filestore_not_supported raises before entry
         pass
 
     @filestore_not_supported
-    def delete_dataset(self, dataset_id):
+    def delete_dataset(self, dataset_id: str) -> NoReturn:  # type: ignore[empty-body]  # unreachable: @filestore_not_supported raises before entry
         pass
 
     @filestore_not_supported
-    def search_datasets(
+    def search_datasets(  # type: ignore[empty-body]  # unreachable: @filestore_not_supported raises before entry
         self,
-        experiment_ids=None,
-        filter_string=None,
-        max_results=1000,
-        order_by=None,
-        page_token=None,
-    ):
+        experiment_ids: list[str] | None = None,
+        filter_string: str | None = None,
+        max_results: int = 1000,
+        order_by: list[str] | None = None,
+        page_token: str | None = None,
+    ) -> NoReturn:
         pass
 
     @filestore_not_supported
-    def upsert_dataset_records(self, dataset_id, records):
+    def upsert_dataset_records(self, dataset_id: str, records: list[dict[str, Any]]) -> NoReturn:  # type: ignore[empty-body]  # unreachable: @filestore_not_supported raises before entry
         pass
 
     @filestore_not_supported
-    def set_dataset_tags(self, dataset_id, tags):
+    def set_dataset_tags(self, dataset_id: str, tags: dict[str, Any]) -> NoReturn:  # type: ignore[empty-body]  # unreachable: @filestore_not_supported raises before entry
         pass
 
     @filestore_not_supported
-    def get_dataset_experiment_ids(self, dataset_id):
+    def get_dataset_experiment_ids(self, dataset_id: str) -> NoReturn:  # type: ignore[empty-body]  # unreachable: @filestore_not_supported raises before entry
         pass
 
     @filestore_not_supported
-    def delete_dataset_tag(self, dataset_id, key):
+    def delete_dataset_tag(self, dataset_id: str, key: str) -> NoReturn:  # type: ignore[empty-body]  # unreachable: @filestore_not_supported raises before entry
         pass
 
     @filestore_not_supported
-    def add_dataset_to_experiments(self, dataset_id, experiment_ids):
+    def add_dataset_to_experiments(self, dataset_id: str, experiment_ids: list[str]) -> NoReturn:  # type: ignore[empty-body]  # unreachable: @filestore_not_supported raises before entry
         pass
 
     @filestore_not_supported
-    def remove_dataset_from_experiments(self, dataset_id, experiment_ids):
+    def remove_dataset_from_experiments(  # type: ignore[empty-body]  # unreachable: @filestore_not_supported raises before entry
+        self, dataset_id: str, experiment_ids: list[str]
+    ) -> NoReturn:
         pass
 
     def link_traces_to_run(self, trace_ids: list[str], run_id: str) -> None:
@@ -2912,5 +3105,5 @@ class FileStore(AbstractStore):
     # abstract method to raise an explicit error.
 
     @filestore_not_supported
-    def query_trace_metrics(self, *args, **kwargs):
+    def query_trace_metrics(self, *args: Any, **kwargs: Any) -> NoReturn:  # type: ignore[empty-body]  # unreachable: @filestore_not_supported raises before entry
         pass

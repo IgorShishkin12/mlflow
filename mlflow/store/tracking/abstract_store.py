@@ -8,10 +8,8 @@ from mlflow.entities import (
     Assessment,
     DatasetInput,
     DatasetRecord,
-    Expectation,
     Experiment,
     ExperimentTag,
-    Feedback,
     Issue,
     IssueSeverity,
     IssueStatus,
@@ -30,7 +28,9 @@ from mlflow.entities import (
     Span,
     ViewType,
 )
+from mlflow.entities.assessment import ExpectationValue, FeedbackValue
 from mlflow.entities.model_registry import PromptVersion
+from mlflow.entities.trace_location import UCSchemaLocation
 from mlflow.entities.trace_metrics import (
     MetricAggregation,
     MetricDataPoint,
@@ -38,7 +38,7 @@ from mlflow.entities.trace_metrics import (
 )
 
 if TYPE_CHECKING:
-    from mlflow.entities import EvaluationDataset
+    from mlflow.entities.evaluation_dataset import EvaluationDataset
     from mlflow.genai.label_schemas.label_schemas import InputType, LabelSchema
     from mlflow.genai.review_queues import ReviewQueue, ReviewQueueItem
     from mlflow.genai.scorers.online.entities import (
@@ -196,10 +196,10 @@ class AbstractStore(MCPServerRegistryMixin, GatewayStoreMixin):
 
     # Deliberately not abstract: the empty body is inherited as-is by stores that
     # don't offer name-based lookup; every concrete tracking store overrides it.
-    def get_experiment_by_name(  # type: ignore[empty-body]
+    def get_experiment_by_name(
         self,
         experiment_name: str,
-    ) -> Experiment:
+    ) -> Experiment | None:
         """
         Fetch the experiment by name from the backend store.
 
@@ -207,7 +207,8 @@ class AbstractStore(MCPServerRegistryMixin, GatewayStoreMixin):
             experiment_name: Name of experiment
 
         Returns:
-            A single :py:class:`mlflow.entities.Experiment` object if it exists.
+            A single :py:class:`mlflow.entities.Experiment` object if it exists,
+            otherwise None.
         """
 
     @abstractmethod
@@ -513,6 +514,33 @@ class AbstractStore(MCPServerRegistryMixin, GatewayStoreMixin):
             f"{self.__class__.__name__} does not support `get_online_trace_details`."
         )
 
+    def set_experiment_trace_location(
+        self,
+        location: UCSchemaLocation,
+        experiment_id: str,
+        sql_warehouse_id: str | None = None,
+    ) -> UCSchemaLocation:
+        """
+        Set the UC schema storage location for traces of the given experiment and link the
+        experiment to it. Only supported by Databricks-backed stores.
+        """
+        raise NotImplementedError(
+            f"{self.__class__.__name__} does not support `set_experiment_trace_location`."
+        )
+
+    def unset_experiment_trace_location(
+        self,
+        experiment_id: str,
+        location: UCSchemaLocation,
+    ) -> None:
+        """
+        Unlink the experiment from the given UC schema trace storage location. Only supported
+        by Databricks-backed stores.
+        """
+        raise NotImplementedError(
+            f"{self.__class__.__name__} does not support `unset_experiment_trace_location`."
+        )
+
     def search_traces(
         self,
         experiment_ids: list[str] | None = None,
@@ -596,7 +624,7 @@ class AbstractStore(MCPServerRegistryMixin, GatewayStoreMixin):
         end_time_ms: int | None = None,
         max_results: int = MAX_RESULTS_QUERY_TRACE_METRICS,
         page_token: str | None = None,
-    ) -> PagedList[list[MetricDataPoint]]:
+    ) -> PagedList[MetricDataPoint]:
         """
         Query trace metrics for the given experiment ids.
 
@@ -670,8 +698,8 @@ class AbstractStore(MCPServerRegistryMixin, GatewayStoreMixin):
         trace_id: str,
         assessment_id: str,
         name: str | None = None,
-        expectation: Expectation | None = None,
-        feedback: Feedback | None = None,
+        expectation: ExpectationValue | None = None,
+        feedback: FeedbackValue | None = None,
         rationale: str | None = None,
         metadata: dict[str, str] | None = None,
     ) -> Assessment:
@@ -684,8 +712,8 @@ class AbstractStore(MCPServerRegistryMixin, GatewayStoreMixin):
             assessment_id: The ID of the assessment upon which overrides will be applied to
                 mutable attributes.
             name: An Optional override to the name of the assessment.
-            expectation: An Optional override of the expectation for the assessment.
-            feedback: An Optional override to the feedback for a given assessment.
+            expectation: An Optional override of the expectation value for the assessment.
+            feedback: An Optional override to the feedback value for a given assessment.
             rationale: An Optional string defining the reasoning behind the override of
                 the assessment.
             metadata: An Optional mapping of additional customizable metadata for the assessment.

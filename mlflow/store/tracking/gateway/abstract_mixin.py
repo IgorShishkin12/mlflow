@@ -8,6 +8,7 @@ from mlflow.entities import (
     GatewayEndpointModelMapping,
     GatewayEndpointTag,
     GatewayModelDefinition,
+    GatewayResourceType,
     GatewaySecretInfo,
     RoutingStrategy,
 )
@@ -370,7 +371,7 @@ class GatewayStoreMixin:
     def create_endpoint_binding(
         self,
         endpoint_id: str,
-        resource_type: str,
+        resource_type: GatewayResourceType,
         resource_id: str,
         created_by: str | None = None,
     ) -> GatewayEndpointBinding:
@@ -379,7 +380,7 @@ class GatewayStoreMixin:
 
         Args:
             endpoint_id: ID of the endpoint to bind.
-            resource_type: Type of resource (e.g., "scorer").
+            resource_type: Type of resource (e.g., GatewayResourceType.SCORER).
             resource_id: Unique identifier for the resource instance.
             created_by: Username of the creator.
 

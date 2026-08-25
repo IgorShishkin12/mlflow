@@ -13,7 +13,15 @@ from collections import defaultdict
 from dataclasses import dataclass, field
 from functools import lru_cache, reduce
 from pathlib import PurePath
-from typing import Any, Iterable, TypedDict, TypeVar
+from typing import (
+    TYPE_CHECKING,
+    Any,
+    Iterable,
+    Literal,
+    NoReturn,
+    TypedDict,
+    TypeVar,
+)
 from urllib.parse import urlparse
 
 import sqlalchemy
@@ -26,7 +34,7 @@ from sqlalchemy.sql.selectable import Select, Subquery
 
 from mlflow.utils.crypto import KEKManager, _decrypt_secret
 
-_SqlAlchemyStatement = TypeVar("_SqlAlchemyStatement", Select, Query)
+_SqlAlchemyStatement = TypeVar("_SqlAlchemyStatement", Select[Any], Query[Any])
 
 import mlflow.store.db.utils
 from mlflow.entities import (
@@ -34,14 +42,16 @@ from mlflow.entities import (
     DatasetInput,
     DatasetRecord,
     DatasetRecordSource,
-    EvaluationDataset,
     Expectation,
     Experiment,
+    ExperimentTag,
     Feedback,
     Issue,
     IssueSeverity,
     IssueStatus,
+    Param,
     Run,
+    RunInfo,
     RunInputs,
     RunOutputs,
     RunStatus,
@@ -59,6 +69,10 @@ from mlflow.entities.assessment import (
     FeedbackValue,
 )
 from mlflow.entities.entity_type import EntityAssociationType
+
+# Imported from its defining module: ``mlflow.entities`` only exposes this class
+# through a lazy module-level ``__getattr__``, which mypy cannot use as a type.
+from mlflow.entities.evaluation_dataset import EvaluationDataset
 from mlflow.entities.gateway_endpoint import GatewayResourceType
 from mlflow.entities.lifecycle_stage import LifecycleStage
 from mlflow.entities.logged_model import LoggedModel
@@ -69,9 +83,8 @@ from mlflow.entities.logged_model_status import LoggedModelStatus
 from mlflow.entities.logged_model_tag import LoggedModelTag
 from mlflow.entities.metric import Metric, MetricWithRunId
 from mlflow.entities.model_registry import PromptVersion
-from mlflow.entities.span import LazySpan
+from mlflow.entities.span import LazySpan, Span
 from mlflow.entities.span_status import SpanStatusCode
-from mlflow.entities.trace import Span
 from mlflow.entities.trace_info_v2 import TraceInfoV2
 from mlflow.entities.trace_location import TraceLocation
 from mlflow.entities.trace_metrics import (
@@ -268,6 +281,13 @@ from mlflow.utils.validation import (
     _validate_trace_tag,
 )
 from mlflow.utils.workspace_utils import DEFAULT_WORKSPACE_NAME
+
+if TYPE_CHECKING:
+    # Annotation-only imports: these GenAI entities are imported lazily at runtime
+    # (inside the methods that use them) to avoid import cycles.
+    from mlflow.genai.label_schemas.label_schemas import InputType, LabelSchema
+    from mlflow.genai.review_queues import ReviewQueue, ReviewQueueItem
+    from mlflow.models import Model
 
 _T = TypeVar("_T")
 
@@ -523,7 +543,7 @@ class SqlAlchemyStore(SqlAlchemyMCPServerRegistryMixin, SqlAlchemyGatewayStoreMi
             SqlExperiment.workspace.name: DEFAULT_WORKSPACE_NAME,
         }
 
-        def decorate(s):
+        def decorate(s: object) -> str:
             if is_string_type(s):
                 return repr(s)
             else:
@@ -572,7 +592,12 @@ class SqlAlchemyStore(SqlAlchemyMCPServerRegistryMixin, SqlAlchemyGatewayStoreMi
     def _get_artifact_location(self, experiment_id):
         return append_to_uri_path(self.artifact_root_uri, str(experiment_id))
 
-    def create_experiment(self, name, artifact_location=None, tags=None):
+    def create_experiment(
+        self,
+        name: str,
+        artifact_location: str | None = None,
+        tags: list[ExperimentTag] | None = None,
+    ) -> str:
         _validate_experiment_name(name)
         if artifact_location:
             artifact_location = resolve_uri_if_local(artifact_location)
@@ -614,17 +639,17 @@ class SqlAlchemyStore(SqlAlchemyMCPServerRegistryMixin, SqlAlchemyGatewayStoreMi
 
     def _search_experiments(
         self,
-        view_type,
-        max_results,
-        filter_string,
-        order_by,
-        page_token,
-    ):
+        view_type: int,
+        max_results: int,
+        filter_string: str | None,
+        order_by: list[str] | None,
+        page_token: str | None,
+    ) -> tuple[list[Experiment], str | None]:
         effective_retention_context = (
             self._get_effective_experiment_trace_archival_retention_context()
         )
 
-        def compute_next_token(current_size):
+        def compute_next_token(current_size: int) -> str | None:
             next_token = None
             if max_results + 1 == current_size:
                 final_offset = offset + max_results
@@ -666,12 +691,12 @@ class SqlAlchemyStore(SqlAlchemyMCPServerRegistryMixin, SqlAlchemyGatewayStoreMi
 
     def search_experiments(
         self,
-        view_type=ViewType.ACTIVE_ONLY,
-        max_results=SEARCH_MAX_RESULTS_DEFAULT,
-        filter_string=None,
-        order_by=None,
-        page_token=None,
-    ):
+        view_type: int = ViewType.ACTIVE_ONLY,
+        max_results: int = SEARCH_MAX_RESULTS_DEFAULT,
+        filter_string: str | None = None,
+        order_by: list[str] | None = None,
+        page_token: str | None = None,
+    ) -> PagedList[Experiment]:
         experiments, next_page_token = self._search_experiments(
             view_type, max_results, filter_string, order_by, page_token
         )
@@ -703,10 +728,10 @@ class SqlAlchemyStore(SqlAlchemyMCPServerRegistryMixin, SqlAlchemyGatewayStoreMi
                 default_location=trace_archival_config.location,
                 default_retention=broader_retention,
             )
-            broader_retention = resolved_trace_archival_config.config.retention
+            resolved_retention = resolved_trace_archival_config.config.retention
 
             return (
-                _validate_trace_archival_retention_string(broader_retention),
+                _validate_trace_archival_retention_string(resolved_retention),
                 set(trace_archival_config.long_retention_allowlist),
             )
         except MlflowException:
@@ -732,9 +757,10 @@ class SqlAlchemyStore(SqlAlchemyMCPServerRegistryMixin, SqlAlchemyGatewayStoreMi
                 long_retention_allowlist=long_retention_allowlist,
             )
 
-        return sql_experiment.to_mlflow_entity(
+        experiment: Experiment = sql_experiment.to_mlflow_entity(
             effective_trace_archival_retention=effective_trace_archival_retention
         )
+        return experiment
 
     def _get_experiment(self, session, experiment_id, view_type, eager=False):
         """
@@ -787,7 +813,12 @@ class SqlAlchemyStore(SqlAlchemyMCPServerRegistryMixin, SqlAlchemyGatewayStoreMi
         return experiment_ids
 
     def _filter_entity_ids(
-        self, session, entity_type: EntityAssociationType, entity_ids: list[str]
+        # NB: plain `str`, not EntityAssociationType — the constants class is not an
+        # Enum, so annotating it here conflicts with callers passing other strings.
+        self,
+        session,
+        entity_type: str,
+        entity_ids: list[str],
     ):
         """
         Hook for subclasses to filter entity IDs (e.g., for workspaces).
@@ -850,7 +881,7 @@ class SqlAlchemyStore(SqlAlchemyMCPServerRegistryMixin, SqlAlchemyGatewayStoreMi
             sqlalchemy.orm.subqueryload(SqlExperiment.tags),
         ]
 
-    def get_experiment(self, experiment_id):
+    def get_experiment(self, experiment_id: str) -> Experiment:
         effective_retention_context = (
             self._get_effective_experiment_trace_archival_retention_context()
         )
@@ -858,7 +889,7 @@ class SqlAlchemyStore(SqlAlchemyMCPServerRegistryMixin, SqlAlchemyGatewayStoreMi
             experiment = self._get_experiment(session, experiment_id, ViewType.ALL, eager=True)
             return self._to_experiment(experiment, effective_retention_context)
 
-    def get_experiment_by_name(self, experiment_name):
+    def get_experiment_by_name(self, experiment_name: str) -> Experiment | None:
         """
         Specialized implementation for SQL backed store.
         """
@@ -881,7 +912,7 @@ class SqlAlchemyStore(SqlAlchemyMCPServerRegistryMixin, SqlAlchemyGatewayStoreMi
                 return None
             return self._to_experiment(experiment, effective_retention_context)
 
-    def delete_experiment(self, experiment_id):
+    def delete_experiment(self, experiment_id: str) -> None:
         with self.ManagedSessionMaker(read_only=False) as session:
             experiment = self._get_experiment(session, experiment_id, ViewType.ACTIVE_ONLY)
             experiment.lifecycle_stage = LifecycleStage.DELETED
@@ -891,7 +922,7 @@ class SqlAlchemyStore(SqlAlchemyMCPServerRegistryMixin, SqlAlchemyGatewayStoreMi
                 self._mark_run_deleted(session, run)
             session.add(experiment)
 
-    def _hard_delete_experiment(self, experiment_id):
+    def _hard_delete_experiment(self, experiment_id: str) -> None:
         """
         Permanently delete a experiment (metadata and metrics, tags, parameters).
         This is used by the ``mlflow gc`` command line and is not intended to be used elsewhere.
@@ -930,7 +961,7 @@ class SqlAlchemyStore(SqlAlchemyMCPServerRegistryMixin, SqlAlchemyGatewayStoreMi
             .all()
         )
 
-    def restore_experiment(self, experiment_id):
+    def restore_experiment(self, experiment_id: str) -> None:
         with self.ManagedSessionMaker(read_only=False) as session:
             experiment = self._get_experiment(session, experiment_id, ViewType.DELETED_ONLY)
             experiment.lifecycle_stage = LifecycleStage.ACTIVE
@@ -940,7 +971,7 @@ class SqlAlchemyStore(SqlAlchemyMCPServerRegistryMixin, SqlAlchemyGatewayStoreMi
                 self._mark_run_active(session, run)
             session.add(experiment)
 
-    def rename_experiment(self, experiment_id, new_name):
+    def rename_experiment(self, experiment_id: str, new_name: str) -> None:
         _validate_experiment_name(new_name)
         with self.ManagedSessionMaker(read_only=False) as session:
             experiment = self._get_experiment(session, experiment_id, ViewType.ALL)
@@ -951,7 +982,14 @@ class SqlAlchemyStore(SqlAlchemyMCPServerRegistryMixin, SqlAlchemyGatewayStoreMi
             experiment.last_update_time = get_current_time_millis()
             session.add(experiment)
 
-    def create_run(self, experiment_id, user_id, start_time, tags, run_name):
+    def create_run(
+        self,
+        experiment_id: str,
+        user_id: str,
+        start_time: int,
+        tags: list[RunTag] | None,
+        run_name: str | None,
+    ) -> Run:
         with self.ManagedSessionMaker(read_only=False) as session:
             experiment = self.get_experiment(experiment_id)
             self._check_experiment_is_active(experiment)
@@ -1097,10 +1135,13 @@ class SqlAlchemyStore(SqlAlchemyMCPServerRegistryMixin, SqlAlchemyGatewayStoreMi
             query = query.with_for_update()
         return query
 
-    def _dataset_query(self, session):
+    def _dataset_query(self, session: Session):
+        # NB: return type deliberately unannotated — it yields legacy ``Sql*`` rows
+        # whose attributes are statically ``Column[T]`` until dbmodels/models.py
+        # migrates to ``Mapped[]`` (see swarm SEAM notes).
         return self._get_query(session, SqlEvaluationDataset)
 
-    def _get_run_inputs(self, session, run_uuids):
+    def _get_run_inputs(self, session, run_uuids: list[str]) -> list[list[DatasetInput]]:
         datasets_with_tags = (
             session
             .query(
@@ -1116,7 +1157,7 @@ class SqlAlchemyStore(SqlAlchemyMCPServerRegistryMixin, SqlAlchemyGatewayStoreMi
             .order_by("run_uuid")
         ).all()
 
-        dataset_inputs_per_run = defaultdict(dict)
+        dataset_inputs_per_run: defaultdict[str, dict[str, DatasetInput]] = defaultdict(dict)
         for input_uuid, run_uuid, dataset_sql, tag_sql in datasets_with_tags:
             dataset_inputs = dataset_inputs_per_run[run_uuid]
             dataset_uuid = dataset_sql.dataset_uuid
@@ -1155,7 +1196,7 @@ class SqlAlchemyStore(SqlAlchemyMCPServerRegistryMixin, SqlAlchemyGatewayStoreMi
                 INVALID_PARAMETER_VALUE,
             )
 
-    def _check_experiment_is_active(self, experiment):
+    def _check_experiment_is_active(self, experiment: Experiment) -> None:
         if experiment.lifecycle_stage != LifecycleStage.ACTIVE:
             raise MlflowException(
                 (
@@ -1165,7 +1206,13 @@ class SqlAlchemyStore(SqlAlchemyMCPServerRegistryMixin, SqlAlchemyGatewayStoreMi
                 INVALID_PARAMETER_VALUE,
             )
 
-    def update_run_info(self, run_id, run_status, end_time, run_name):
+    def update_run_info(
+        self,
+        run_id: str,
+        run_status: int | None,
+        end_time: int | None,
+        run_name: str | None,
+    ) -> RunInfo:
         with self.ManagedSessionMaker(read_only=False) as session:
             run = self._get_run(run_uuid=run_id, session=session)
             self._check_run_is_active(run)
@@ -1182,9 +1229,9 @@ class SqlAlchemyStore(SqlAlchemyMCPServerRegistryMixin, SqlAlchemyGatewayStoreMi
                     run_name_tag.value = run_name
 
             session.add(run)
-            run = run.to_mlflow_entity()
+            mlflow_run: Run = run.to_mlflow_entity()
 
-            return run.info
+            return mlflow_run.info
 
     def _try_get_run_tag(self, session, run_id, tagKey, eager=False):
         query_options = self._get_eager_run_query_options() if eager else []
@@ -1196,7 +1243,7 @@ class SqlAlchemyStore(SqlAlchemyMCPServerRegistryMixin, SqlAlchemyGatewayStoreMi
             .one_or_none()
         )
 
-    def get_run(self, run_id):
+    def get_run(self, run_id: str) -> Run:
         with self.ManagedSessionMaker() as session:
             # Load the run with the specified id and eagerly load its summary metrics, params, and
             # tags. These attributes are referenced during the invocation of
@@ -1215,19 +1262,19 @@ class SqlAlchemyStore(SqlAlchemyMCPServerRegistryMixin, SqlAlchemyGatewayStoreMi
                 RunOutputs(model_outputs),
             )
 
-    def restore_run(self, run_id):
+    def restore_run(self, run_id: str) -> None:
         with self.ManagedSessionMaker(read_only=False) as session:
             run = self._get_run(run_uuid=run_id, session=session)
             run.lifecycle_stage = LifecycleStage.ACTIVE
             run.deleted_time = None
             session.add(run)
 
-    def delete_run(self, run_id):
+    def delete_run(self, run_id: str) -> None:
         with self.ManagedSessionMaker(read_only=False) as session:
             run = self._get_run(run_uuid=run_id, session=session)
             self._mark_run_deleted(session, run)
 
-    def _hard_delete_run(self, run_id):
+    def _hard_delete_run(self, run_id: str) -> None:
         """
         Permanently delete a run (metadata and metrics, tags, parameters).
         This is used by the ``mlflow gc`` command line and is not intended to be used elsewhere.
@@ -1236,7 +1283,7 @@ class SqlAlchemyStore(SqlAlchemyMCPServerRegistryMixin, SqlAlchemyGatewayStoreMi
             run = self._get_run(run_uuid=run_id, session=session)
             session.delete(run)
 
-    def _get_deleted_runs(self, older_than=0):
+    def _get_deleted_runs(self, older_than: int = 0) -> list[str]:
         """
         Get all deleted run ids.
 
@@ -1255,9 +1302,10 @@ class SqlAlchemyStore(SqlAlchemyMCPServerRegistryMixin, SqlAlchemyGatewayStoreMi
                 )
                 .all()
             )
-            return [run.run_uuid for run in runs]
+            run_ids: list[str] = [run.run_uuid for run in runs]
+            return run_ids
 
-    def log_metric(self, run_id, metric):
+    def log_metric(self, run_id: str, metric: Metric) -> None:
         # simply call _log_metrics and let it handle the rest
 
         if metric.model_id is not None:
@@ -1277,7 +1325,7 @@ class SqlAlchemyStore(SqlAlchemyMCPServerRegistryMixin, SqlAlchemyGatewayStoreMi
         """
         is_nan = math.isnan(metric_value)
         if is_nan:
-            value = 0
+            value: float = 0
         elif math.isinf(metric_value):
             #  NB: Sql can not represent Infs = > We replace +/- Inf with max/min 64b float
             # value
@@ -1286,12 +1334,14 @@ class SqlAlchemyStore(SqlAlchemyMCPServerRegistryMixin, SqlAlchemyGatewayStoreMi
             value = metric_value
         return is_nan, value
 
-    def _log_metrics(self, run_id, metrics):
+    # NB: no return annotation -- the call below forwards through the untyped
+    # ``_run_with_deadlock_retry`` helper, whose result is always discarded here.
+    def _log_metrics(self, run_id: str, metrics: list[Metric]):
         # Retry on DB deadlock: each attempt opens a fresh session in _log_metrics_once, so the
         # victim is redriven instead of surfacing an HTTP 503.
         return self._run_with_deadlock_retry(self._log_metrics_once, run_id, metrics)
 
-    def _log_metrics_once(self, run_id, metrics):
+    def _log_metrics_once(self, run_id: str, metrics: list[Metric]) -> None:
         # Duplicate metric values are eliminated here to maintain
         # the same behavior in log_metric
         metric_instances = []
@@ -1323,7 +1373,7 @@ class SqlAlchemyStore(SqlAlchemyMCPServerRegistryMixin, SqlAlchemyGatewayStoreMi
             run = self._get_run(run_uuid=run_id, session=session)
             self._check_run_is_active(run)
 
-            def _insert_metrics(metric_instances):
+            def _insert_metrics(metric_instances: list[SqlMetric]) -> None:
                 session.add_all(metric_instances)
                 self._update_latest_metrics_if_necessary(metric_instances, session)
                 session.commit()
@@ -1360,7 +1410,9 @@ class SqlAlchemyStore(SqlAlchemyMCPServerRegistryMixin, SqlAlchemyGatewayStoreMi
                 # Build an ordered identity-to-instance mapping. Using a dict
                 # preserves insertion order and deduplicates same-batch entries
                 # (e.g. multiple NaN objects that sanitize to the same DB identity).
-                metrics_by_id = {}
+                # Keys are legacy dbmodel column attributes, which are statically
+                # opaque (see models.py Column declarations), hence the Any elements.
+                metrics_by_id: dict[tuple[Any, ...], SqlMetric] = {}
                 for m in metric_instances:
                     metrics_by_id.setdefault(
                         _metric_id(m.key, m.timestamp, m.step, m.value, m.is_nan), m
@@ -1368,7 +1420,7 @@ class SqlAlchemyStore(SqlAlchemyMCPServerRegistryMixin, SqlAlchemyGatewayStoreMi
 
                 candidates = list(metrics_by_id)
 
-                existing_ids = set()
+                existing_ids: set[tuple[Any, ...]] = set()
                 for i in range(0, len(candidates), _METRIC_DEDUP_CHUNK_SIZE):
                     chunk = candidates[i : i + _METRIC_DEDUP_CHUNK_SIZE]
                     row_predicates = [
@@ -1484,7 +1536,11 @@ class SqlAlchemyStore(SqlAlchemyMCPServerRegistryMixin, SqlAlchemyGatewayStoreMi
                     ]
                     session.add_all(non_existing_metrics)
 
-    def _update_latest_metrics_if_necessary(self, logged_metrics, session):
+    def _update_latest_metrics_if_necessary(self, logged_metrics, session: Session) -> None:
+        # NB: ``logged_metrics`` mixes SqlMetric instances and SqlLatestMetric rows whose
+        # attributes are compared interchangeably. They are left untyped because legacy
+        # dbmodel column attributes (models.py uses bare ``Column`` without ``Mapped[]``)
+        # are statically opaque.
         def _compare_metrics(metric_a, metric_b):
             """
             Returns:
@@ -1565,7 +1621,8 @@ class SqlAlchemyStore(SqlAlchemyMCPServerRegistryMixin, SqlAlchemyGatewayStoreMi
         # if there's no SqlLatestMetric entry for the current metric key,
         # create a new SqlLatestMetric instance and put it in
         # new_latest_metric_dict so that they can be saved later.
-        new_latest_metric_dict = {}
+        # Keys are legacy dbmodel column attributes (statically opaque), hence Any.
+        new_latest_metric_dict: dict[Any, SqlLatestMetric] = {}
         for logged_metric in logged_metrics:
             latest_metric = latest_metrics.get(logged_metric.key)
             # a metric key can be passed more then once within logged metrics
@@ -1605,7 +1662,13 @@ class SqlAlchemyStore(SqlAlchemyMCPServerRegistryMixin, SqlAlchemyGatewayStoreMi
         if new_latest_metric_dict:
             session.add_all(new_latest_metric_dict.values())
 
-    def get_metric_history(self, run_id, metric_key, max_results=None, page_token=None):
+    def get_metric_history(
+        self,
+        run_id: str,
+        metric_key: str,
+        max_results: int | None = None,
+        page_token: str | None = None,
+    ) -> list[Metric]:
         """
         Return all logged values for a given metric.
 
@@ -1646,7 +1709,9 @@ class SqlAlchemyStore(SqlAlchemyMCPServerRegistryMixin, SqlAlchemyGatewayStoreMi
 
             return PagedList([metric.to_mlflow_entity() for metric in metrics], next_token)
 
-    def get_metric_history_bulk(self, run_ids, metric_key, max_results):
+    def get_metric_history_bulk(
+        self, run_ids: list[str], metric_key: str, max_results: int
+    ) -> list[MetricWithRunId]:
         """
         Return all logged values for a given metric.
 
@@ -1692,10 +1757,10 @@ class SqlAlchemyStore(SqlAlchemyMCPServerRegistryMixin, SqlAlchemyGatewayStoreMi
                 for metric in metrics
             ]
 
-    def get_max_step_for_metric(self, run_id, metric_key):
+    def get_max_step_for_metric(self, run_id: str, metric_key: str) -> int:
         with self.ManagedSessionMaker() as session:
             self._validate_run_accessible(session, run_id)
-            max_step = (
+            max_step: int | None = (
                 session
                 .query(func.max(SqlMetric.step))
                 .filter(SqlMetric.run_uuid == run_id, SqlMetric.key == metric_key)
@@ -1703,7 +1768,9 @@ class SqlAlchemyStore(SqlAlchemyMCPServerRegistryMixin, SqlAlchemyGatewayStoreMi
             )
             return max_step or 0
 
-    def get_metric_history_bulk_interval_from_steps(self, run_id, metric_key, steps, max_results):
+    def get_metric_history_bulk_interval_from_steps(
+        self, run_id: str, metric_key: str, steps: list[int], max_results: int
+    ) -> list[MetricWithRunId]:
         with self.ManagedSessionMaker() as session:
             self._validate_run_accessible(session, run_id)
             metrics = (
@@ -1771,13 +1838,13 @@ class SqlAlchemyStore(SqlAlchemyMCPServerRegistryMixin, SqlAlchemyGatewayStoreMi
                 )
         return metrics_with_run_ids
 
-    def _supports_window_functions(self, session) -> bool:
+    def _supports_window_functions(self, session: Session) -> bool:
         # NTILE / ROW_NUMBER are available on every backend MLflow targets except MySQL < 8.0 and
         # MariaDB < 10.2, both of which MLflow still supports (e.g. MySQL 5.7).
         if self.db_type != MYSQL:
             return True
         dialect = session.get_bind().dialect
-        version = getattr(dialect, "server_version_info", None)
+        version: tuple[int, ...] | None = getattr(dialect, "server_version_info", None)
         if not version:
             return True
         if getattr(dialect, "_is_mariadb", False):
@@ -1785,16 +1852,30 @@ class SqlAlchemyStore(SqlAlchemyMCPServerRegistryMixin, SqlAlchemyGatewayStoreMi
         return version >= (8, 0)
 
     def _sample_metric_history_single_run(
-        self, session, run_id, metric_key, max_results, start_step, end_step
+        self,
+        session: Session,
+        run_id: str,
+        metric_key: str,
+        max_results: int,
+        start_step: int | None,
+        end_step: int | None,
     ) -> list[MetricWithRunId]:
-        filters = [SqlMetric.run_uuid == run_id, SqlMetric.key == metric_key]
+        filters: list[ColumnElement[bool]] = [
+            SqlMetric.run_uuid == run_id,
+            SqlMetric.key == metric_key,
+        ]
         if start_step is not None and end_step is not None:
             filters.append(SqlMetric.step >= start_step)
             filters.append(SqlMetric.step <= end_step)
 
         # ``is_nan`` is part of the metric primary key, so include it in every ordering to keep
         # sampling deterministic and preserve a NaN boundary point on ties.
-        order_by = [SqlMetric.step, SqlMetric.timestamp, SqlMetric.value, SqlMetric.is_nan]
+        order_by: list[ColumnElement[Any]] = [
+            SqlMetric.step,
+            SqlMetric.timestamp,
+            SqlMetric.value,
+            SqlMetric.is_nan,
+        ]
 
         if self._supports_window_functions(session):
             rows = self._sample_rows_with_window_functions(session, filters, order_by, max_results)
@@ -1814,7 +1895,13 @@ class SqlAlchemyStore(SqlAlchemyMCPServerRegistryMixin, SqlAlchemyGatewayStoreMi
             for row in rows
         ]
 
-    def _sample_rows_with_window_functions(self, session, filters, order_by, max_results):
+    def _sample_rows_with_window_functions(
+        self,
+        session: Session,
+        filters: list[ColumnElement[bool]],
+        order_by: list[ColumnElement[Any]],
+        max_results: int,
+    ):
         # Assign each row to one of ``max_results`` evenly sized buckets across the full ordered
         # result set, then keep the first row of each bucket. NTILE produces one bucket per row
         # when there are fewer than ``max_results`` rows, so all rows are returned in that case.
@@ -1876,7 +1963,13 @@ class SqlAlchemyStore(SqlAlchemyMCPServerRegistryMixin, SqlAlchemyGatewayStoreMi
                 rows.append(last_row)
         return rows
 
-    def _sample_rows_in_python(self, session, filters, order_by, max_results):
+    def _sample_rows_in_python(
+        self,
+        session: Session,
+        filters: list[ColumnElement[bool]],
+        order_by: list[ColumnElement[Any]],
+        max_results: int,
+    ):
         # Fallback for backends without window functions (MySQL < 8.0 / MariaDB < 10.2). The rows
         # are streamed server-side and an evenly spaced sample is kept, so the server holds at most
         # ~``max_results`` rows in memory regardless of how many values were logged.
@@ -1894,7 +1987,7 @@ class SqlAlchemyStore(SqlAlchemyMCPServerRegistryMixin, SqlAlchemyGatewayStoreMi
         )
         return [row for idx, row in enumerate(rows_iter) if idx in target_indices]
 
-    def _search_datasets(self, experiment_ids):
+    def _search_datasets(self, experiment_ids: list[str]) -> list[_DatasetSummary]:
         """
         Return all dataset summaries associated to the given experiments.
 
@@ -1906,9 +1999,9 @@ class SqlAlchemyStore(SqlAlchemyMCPServerRegistryMixin, SqlAlchemyGatewayStoreMi
         """
 
         MAX_DATASET_SUMMARIES_RESULTS = 1000
-        experiment_ids = [int(e) for e in experiment_ids]
+        experiment_id_ints = [int(e) for e in experiment_ids]
         with self.ManagedSessionMaker() as session:
-            experiment_ids = self._filter_experiment_ids(session, experiment_ids)
+            experiment_ids = self._filter_experiment_ids(session, experiment_id_ints)
             # Note that the join with the input tag table is a left join. This is required so if an
             # input does not have the MLFLOW_DATASET_CONTEXT tag, we still return that entry as part
             # of the final result with the context set to None.
@@ -1946,7 +2039,7 @@ class SqlAlchemyStore(SqlAlchemyMCPServerRegistryMixin, SqlAlchemyGatewayStoreMi
                 for summary in summaries
             ]
 
-    def log_param(self, run_id, param):
+    def log_param(self, run_id: str, param: Param) -> None:
         param = _validate_param(param.key, param.value)
         with self.ManagedSessionMaker(read_only=False) as session:
             run = self._get_run(run_uuid=run_id, session=session)
@@ -1994,7 +2087,7 @@ class SqlAlchemyStore(SqlAlchemyMCPServerRegistryMixin, SqlAlchemyGatewayStoreMi
                 else:
                     raise
 
-    def _log_params(self, run_id, params):
+    def _log_params(self, run_id: str, params: list[Param]) -> None:
         if not params:
             return
 
@@ -2027,7 +2120,7 @@ class SqlAlchemyStore(SqlAlchemyMCPServerRegistryMixin, SqlAlchemyGatewayStoreMi
 
             session.add_all(new_params)
 
-    def set_experiment_tag(self, experiment_id, tag):
+    def set_experiment_tag(self, experiment_id: str, tag: ExperimentTag) -> None:
         """
         Set a tag for the specified experiment
 
@@ -2045,7 +2138,7 @@ class SqlAlchemyStore(SqlAlchemyMCPServerRegistryMixin, SqlAlchemyGatewayStoreMi
                 SqlExperimentTag(experiment_id=experiment_id, key=tag.key, value=tag.value)
             )
 
-    def delete_experiment_tag(self, experiment_id, key):
+    def delete_experiment_tag(self, experiment_id: str, key: str) -> None:
         """
         Delete a tag from the specified experiment
 
@@ -2078,7 +2171,7 @@ class SqlAlchemyStore(SqlAlchemyMCPServerRegistryMixin, SqlAlchemyGatewayStoreMi
                 )
             session.delete(filtered_tags[0])
 
-    def set_tag(self, run_id, tag):
+    def set_tag(self, run_id: str, tag: RunTag) -> None:
         """
         Set a tag on a run.
 
@@ -2097,7 +2190,7 @@ class SqlAlchemyStore(SqlAlchemyMCPServerRegistryMixin, SqlAlchemyGatewayStoreMi
                 # NB: Updating the run_info will set the tag. No need to do it twice.
                 session.merge(SqlTag(run_uuid=run_id, key=tag.key, value=tag.value))
 
-    def _set_tags(self, run_id, tags):
+    def _set_tags(self, run_id: str, tags: list[RunTag]) -> None:
         """
         Set multiple tags on a run
 
@@ -2127,7 +2220,7 @@ class SqlAlchemyStore(SqlAlchemyMCPServerRegistryMixin, SqlAlchemyGatewayStoreMi
                     )
                     current_tags = {t.key: t for t in current_tags}
 
-                    new_tag_dict = {}
+                    new_tag_dict: dict[str, SqlTag] = {}
                     for tag in tags:
                         # NB: If the run name tag is explicitly set, update the run info attribute
                         # and do not resubmit the tag for overwrite as the tag will be set within
@@ -2176,7 +2269,7 @@ class SqlAlchemyStore(SqlAlchemyMCPServerRegistryMixin, SqlAlchemyGatewayStoreMi
 
             _try_insert_tags(attempt_number=0, max_retries=3)
 
-    def delete_tag(self, run_id, key):
+    def delete_tag(self, run_id: str, key: str) -> None:
         """
         Delete a tag from a run. This is irreversible.
 
@@ -2204,15 +2297,15 @@ class SqlAlchemyStore(SqlAlchemyMCPServerRegistryMixin, SqlAlchemyGatewayStoreMi
 
     def _search_runs(
         self,
-        experiment_ids,
-        filter_string,
-        run_view_type,
-        max_results,
-        order_by,
-        page_token,
-    ):
-        def compute_next_token(current_size):
-            next_token = None
+        experiment_ids: list[str],
+        filter_string: str,
+        run_view_type: int,
+        max_results: int,
+        order_by: list[str] | None,
+        page_token: str | None,
+    ) -> tuple[list[Run], str | None]:
+        def compute_next_token(current_size: int) -> str | None:
+            next_token: str | None = None
             if max_results is not None and current_size == max_results + 1:
                 final_offset = offset + max_results
                 next_token = SearchUtils.create_page_token(final_offset)
@@ -2251,14 +2344,14 @@ class SqlAlchemyStore(SqlAlchemyMCPServerRegistryMixin, SqlAlchemyGatewayStoreMi
                 stmt = stmt.outerjoin(j)
 
             offset = SearchUtils.parse_start_offset_from_page_token(page_token)
-            experiment_ids = [int(e) for e in experiment_ids]
-            experiment_ids = self._filter_experiment_ids(session, experiment_ids)
+            filtered_experiment_ids: list[int] = [int(e) for e in experiment_ids]
+            filtered_experiment_ids = self._filter_experiment_ids(session, filtered_experiment_ids)
             stmt = (
                 stmt
                 .distinct()
                 .options(*self._get_eager_run_query_options())
                 .filter(
-                    SqlRun.experiment_id.in_(experiment_ids),
+                    SqlRun.experiment_id.in_(filtered_experiment_ids),
                     SqlRun.lifecycle_stage.in_(stages),
                     *attribute_filters,
                 )
@@ -2269,7 +2362,7 @@ class SqlAlchemyStore(SqlAlchemyMCPServerRegistryMixin, SqlAlchemyGatewayStoreMi
                 stmt = stmt.limit(max_results + 1)
             queried_runs = session.execute(stmt).scalars(SqlRun).all()
 
-            runs = [run.to_mlflow_entity() for run in queried_runs]
+            runs: list[Run] = [run.to_mlflow_entity() for run in queried_runs]
             run_ids = [run.info.run_id for run in runs]
 
             # add inputs and outputs to runs
@@ -2294,7 +2387,13 @@ class SqlAlchemyStore(SqlAlchemyMCPServerRegistryMixin, SqlAlchemyGatewayStoreMi
 
         return runs_with_inputs_outputs, next_page_token
 
-    def log_batch(self, run_id, metrics, params, tags):
+    def log_batch(
+        self,
+        run_id: str,
+        metrics: list[Metric],
+        params: list[Param],
+        tags: list[RunTag],
+    ) -> None:
         _validate_run_id(run_id)
         metrics, params, tags = _validate_batch_log_data(metrics, params, tags)
         _validate_batch_log_limits(metrics, params, tags)
@@ -2313,7 +2412,7 @@ class SqlAlchemyStore(SqlAlchemyMCPServerRegistryMixin, SqlAlchemyGatewayStoreMi
             except Exception as e:
                 raise MlflowException(e, INTERNAL_ERROR)
 
-    def record_logged_model(self, run_id, mlflow_model):
+    def record_logged_model(self, run_id: str, mlflow_model: "Model") -> None:
         from mlflow.models import Model
 
         if not isinstance(mlflow_model, Model):
@@ -2336,7 +2435,7 @@ class SqlAlchemyStore(SqlAlchemyMCPServerRegistryMixin, SqlAlchemyGatewayStoreMi
         run_id: str,
         datasets: list[DatasetInput] | None = None,
         models: list[LoggedModelInput] | None = None,
-    ):
+    ) -> None:
         """
         Log inputs, such as datasets, to the specified run.
 
@@ -2369,11 +2468,11 @@ class SqlAlchemyStore(SqlAlchemyMCPServerRegistryMixin, SqlAlchemyGatewayStoreMi
 
     def _log_inputs_impl(
         self,
-        experiment_id,
-        run_id,
+        experiment_id: str,
+        run_id: str,
         dataset_inputs: list[DatasetInput] | None = None,
         models: list[LoggedModelInput] | None = None,
-    ):
+    ) -> None:
         dataset_inputs = dataset_inputs or []
         for dataset_input in dataset_inputs:
             if dataset_input.dataset is None:
@@ -2500,7 +2599,7 @@ class SqlAlchemyStore(SqlAlchemyMCPServerRegistryMixin, SqlAlchemyGatewayStoreMi
 
             session.add_all(objs_to_write)
 
-    def log_outputs(self, run_id: str, models: list[LoggedModelOutput]):
+    def log_outputs(self, run_id: str, models: list[LoggedModelOutput]) -> None:
         with self.ManagedSessionMaker(read_only=False) as session:
             run = self._get_run(run_uuid=run_id, session=session)
             self._check_run_is_active(run)
@@ -2519,12 +2618,13 @@ class SqlAlchemyStore(SqlAlchemyMCPServerRegistryMixin, SqlAlchemyGatewayStoreMi
     def _get_model_inputs(
         self,
         run_id: str,
+        # NB: default restored for API compatibility; both in-repo callers pass it.
         session: sqlalchemy.orm.Session | None = None,
     ) -> list[LoggedModelInput]:
         return [
             LoggedModelInput(model_id=input.destination_id)
             for input in (
-                session
+                session  # type: ignore[union-attr]  # API-compat default; both in-repo callers pass session
                 .query(SqlInput)
                 .filter(
                     SqlInput.source_type == "RUN_INPUT",
@@ -2645,7 +2745,7 @@ class SqlAlchemyStore(SqlAlchemyMCPServerRegistryMixin, SqlAlchemyGatewayStoreMi
             session.commit()
             return logged_model.to_mlflow_entity()
 
-    def log_logged_model_params(self, model_id: str, params: list[LoggedModelParameter]):
+    def log_logged_model_params(self, model_id: str, params: list[LoggedModelParameter]) -> None:
         with self.ManagedSessionMaker(read_only=False) as session:
             logged_model = self._get_logged_model_record(session, model_id)
             session.add_all(
@@ -2659,7 +2759,7 @@ class SqlAlchemyStore(SqlAlchemyMCPServerRegistryMixin, SqlAlchemyGatewayStoreMi
             )
 
     def _get_logged_model_record(self, session, model_id: str) -> SqlLoggedModel:
-        logged_model = (
+        logged_model: SqlLoggedModel | None = (
             self
             ._get_query(session, SqlLoggedModel)
             .filter(SqlLoggedModel.model_id == model_id)
@@ -2669,7 +2769,7 @@ class SqlAlchemyStore(SqlAlchemyMCPServerRegistryMixin, SqlAlchemyGatewayStoreMi
             self._raise_model_not_found(model_id)
         return logged_model
 
-    def _raise_model_not_found(self, model_id: str):
+    def _raise_model_not_found(self, model_id: str) -> NoReturn:
         raise MlflowException(
             f"Logged model with ID '{model_id}' not found.",
             RESOURCE_DOES_NOT_EXIST,
@@ -2683,27 +2783,27 @@ class SqlAlchemyStore(SqlAlchemyMCPServerRegistryMixin, SqlAlchemyGatewayStoreMi
             if not allow_deleted:
                 query = query.filter(SqlLoggedModel.lifecycle_stage != LifecycleStage.DELETED)
 
-            logged_model = query.first()
+            logged_model: SqlLoggedModel | None = query.first()
             if not logged_model:
                 self._raise_model_not_found(model_id)
 
             return logged_model.to_mlflow_entity()
 
-    def delete_logged_model(self, model_id):
+    def delete_logged_model(self, model_id: str) -> None:
         with self.ManagedSessionMaker(read_only=False) as session:
             logged_model = self._get_logged_model_record(session, model_id)
             logged_model.lifecycle_stage = LifecycleStage.DELETED
             logged_model.last_updated_timestamp_ms = get_current_time_millis()
             session.commit()
 
-    def _hard_delete_logged_model(self, model_id):
+    def _hard_delete_logged_model(self, model_id: str) -> None:
         with self.ManagedSessionMaker(read_only=False) as session:
             logged_model = session.get(SqlLoggedModel, model_id)
             if not logged_model:
                 self._raise_model_not_found(model_id)
             session.delete(logged_model)
 
-    def _get_deleted_logged_models(self, older_than=0):
+    def _get_deleted_logged_models(self, older_than: int = 0) -> list[str]:
         current_time = get_current_time_millis()
         with self.ManagedSessionMaker() as session:
             models = (
@@ -2877,7 +2977,7 @@ class SqlAlchemyStore(SqlAlchemyMCPServerRegistryMixin, SqlAlchemyGatewayStoreMi
             # Resolve gateway endpoint ID to name before returning
             return self.resolve_endpoint_in_scorer(entity)
 
-    def list_scorers(self, experiment_id) -> list[ScorerVersion]:
+    def list_scorers(self, experiment_id: str) -> list[ScorerVersion]:
         """
         List all scorers for an experiment.
 
@@ -2971,7 +3071,9 @@ class SqlAlchemyStore(SqlAlchemyMCPServerRegistryMixin, SqlAlchemyGatewayStoreMi
                 for i, sv in enumerate(sql_scorer_versions)
             ]
 
-    def get_scorer(self, experiment_id, name, version=None) -> ScorerVersion:
+    def get_scorer(
+        self, experiment_id: str, name: str, version: int | None = None
+    ) -> ScorerVersion:
         """
         Get a specific scorer for an experiment.
 
@@ -3065,7 +3167,7 @@ class SqlAlchemyStore(SqlAlchemyMCPServerRegistryMixin, SqlAlchemyGatewayStoreMi
                 )
         return sql_scorer_version
 
-    def delete_scorer(self, experiment_id, name, version=None) -> None:
+    def delete_scorer(self, experiment_id: str, name: str, version: int | None = None) -> None:
         """
         Delete a scorer for an experiment.
 
@@ -3138,7 +3240,7 @@ class SqlAlchemyStore(SqlAlchemyMCPServerRegistryMixin, SqlAlchemyGatewayStoreMi
 
                 session.delete(scorer)
 
-    def list_scorer_versions(self, experiment_id, name) -> list[ScorerVersion]:
+    def list_scorer_versions(self, experiment_id: str, name: str) -> list[ScorerVersion]:
         """
         List all versions of a specific scorer for an experiment.
 
@@ -3441,14 +3543,16 @@ class SqlAlchemyStore(SqlAlchemyMCPServerRegistryMixin, SqlAlchemyGatewayStoreMi
 
     def _apply_order_by_search_logged_models(
         self,
-        models: sqlalchemy.orm.Query,
+        models: sqlalchemy.orm.Query[SqlLoggedModel],
         session: sqlalchemy.orm.Session,
         order_by: list[dict[str, Any]] | None = None,
-    ) -> sqlalchemy.orm.Query:
+    ) -> sqlalchemy.orm.Query[SqlLoggedModel]:
         order_by_clauses = []
         has_creation_timestamp = False
         for ob in order_by or []:
-            field_name = ob.get("field_name")
+            # NB: left as ``Any`` rather than ``str`` because the token comes from an
+            # unvalidated mapping and may be absent; runtime validation raises below.
+            field_name: Any = ob.get("field_name")
             ascending = ob.get("ascending", True)
             if "." not in field_name:
                 name = SqlLoggedModel.ALIASES.get(field_name, field_name)
@@ -3526,18 +3630,18 @@ class SqlAlchemyStore(SqlAlchemyMCPServerRegistryMixin, SqlAlchemyGatewayStoreMi
 
     def _apply_filter_string_datasets_search_logged_models(
         self,
-        models: sqlalchemy.orm.Query,
+        models: sqlalchemy.orm.Query[SqlLoggedModel],
         session: sqlalchemy.orm.Session,
         experiment_ids: list[str],
         filter_string: str | None,
         datasets: list[dict[str, Any]] | None,
-    ):
+    ) -> sqlalchemy.orm.Query[SqlLoggedModel]:
         from mlflow.utils.search_logged_model_utils import EntityType, parse_filter_string
 
         comparisons = parse_filter_string(filter_string)
         dialect = self._get_dialect()
-        attr_filters: list[sqlalchemy.BinaryExpression] = []
-        non_attr_filters: list[sqlalchemy.BinaryExpression] = []
+        attr_filters: list[ColumnElement[bool]] = []
+        non_attr_filters: list[Subquery] = []
 
         dataset_filters = []
         if datasets:
@@ -3601,10 +3705,10 @@ class SqlAlchemyStore(SqlAlchemyMCPServerRegistryMixin, SqlAlchemyGatewayStoreMi
             )
             models = models.join(subquery)
 
-        experiment_ids = [int(e) for e in experiment_ids]
+        experiment_id_ints = [int(e) for e in experiment_ids]
         return models.filter(
             SqlLoggedModel.lifecycle_stage != LifecycleStage.DELETED,
-            SqlLoggedModel.experiment_id.in_(experiment_ids),
+            SqlLoggedModel.experiment_id.in_(experiment_id_ints),
             *attr_filters,
         )
 
@@ -3612,7 +3716,7 @@ class SqlAlchemyStore(SqlAlchemyMCPServerRegistryMixin, SqlAlchemyGatewayStoreMi
         self,
         experiment_ids: list[str],
         filter_string: str | None = None,
-        datasets: list[DatasetFilter] | None = None,
+        datasets: list[dict[str, Any]] | None = None,
         max_results: int | None = None,
         order_by: list[dict[str, Any]] | None = None,
         page_token: str | None = None,
@@ -3636,24 +3740,27 @@ class SqlAlchemyStore(SqlAlchemyMCPServerRegistryMixin, SqlAlchemyGatewayStoreMi
                 models, session, experiment_ids, filter_string, datasets
             )
             models = self._apply_order_by_search_logged_models(models, session, order_by)
-            models = models.offset(offset).limit(max_results + 1).all()
+            rows = models.offset(offset).limit(max_results + 1).all()
 
-            if len(models) > max_results:
-                token = SearchLoggedModelsPaginationToken(
+            next_token: str | None
+            if len(rows) > max_results:
+                next_token = SearchLoggedModelsPaginationToken(
                     offset=offset + max_results,
                     experiment_ids=experiment_ids,
                     filter_string=filter_string,
                     order_by=order_by,
                 ).encode()
             else:
-                token = None
+                next_token = None
 
-            return PagedList([lm.to_mlflow_entity() for lm in models[:max_results]], token=token)
+            return PagedList([lm.to_mlflow_entity() for lm in rows[:max_results]], token=next_token)
 
     #######################################################################################
     # Below are Tracing APIs. We may refactor them to be in a separate class in the future.
     #######################################################################################
-    def _get_trace_artifact_location_tag(self, experiment, trace_id: str) -> SqlTraceTag:
+    def _get_trace_artifact_location_tag(
+        self, experiment: Experiment, trace_id: str
+    ) -> SqlTraceTag:
         # Trace data is stored as file artifacts regardless of the tracking backend choice.
         # We use subdirectory "/traces" under the experiment's artifact location to isolate
         # them from run artifacts.
@@ -3702,7 +3809,8 @@ class SqlAlchemyStore(SqlAlchemyMCPServerRegistryMixin, SqlAlchemyGatewayStoreMi
         """
         # Retry on DB deadlocks so a concurrent log_spans()/start_trace() race does not
         # drop the trace. Each attempt opens a fresh managed session.
-        return self._run_with_deadlock_retry(self._start_trace_once, trace_info)
+        trace: TraceInfo = self._run_with_deadlock_retry(self._start_trace_once, trace_info)
+        return trace
 
     def _start_trace_once(self, trace_info: "TraceInfo") -> TraceInfo:
         with self.ManagedSessionMaker(read_only=False) as session:
@@ -3844,8 +3952,10 @@ class SqlAlchemyStore(SqlAlchemyMCPServerRegistryMixin, SqlAlchemyGatewayStoreMi
                 # across transactions and avoid deadlocks.
                 for k, v in sorted(request_metadata.items()):
                     session.merge(SqlTraceMetadata(request_id=trace_id, key=k, value=v))
-                for k, v in sorted(trace_metrics.items()):
-                    session.merge(SqlTraceMetrics(request_id=trace_id, key=k, value=v))
+                for metric_key, metric_value in sorted(trace_metrics.items()):
+                    session.merge(
+                        SqlTraceMetrics(request_id=trace_id, key=metric_key, value=metric_value)
+                    )
                 session.flush()
                 sql_trace_info = self._get_sql_trace_info(
                     session,
@@ -3853,7 +3963,8 @@ class SqlAlchemyStore(SqlAlchemyMCPServerRegistryMixin, SqlAlchemyGatewayStoreMi
                     workspace=trace_write_workspace,
                 )
 
-            return sql_trace_info.to_mlflow_entity()
+            result_trace_info: TraceInfo = sql_trace_info.to_mlflow_entity()
+            return result_trace_info
 
     def get_trace_info(self, trace_id: str) -> TraceInfo:
         """
@@ -3878,10 +3989,13 @@ class SqlAlchemyStore(SqlAlchemyMCPServerRegistryMixin, SqlAlchemyGatewayStoreMi
                     f"Trace with ID '{trace_id}' not found.",
                     RESOURCE_DOES_NOT_EXIST,
                 )
-            return _build_trace_infos_from_rows(session, [trace_row])[0]
+            trace_info: TraceInfo = _build_trace_infos_from_rows(session, [trace_row])[0]
+            return trace_info
 
-    def _get_sql_trace_info(self, session, trace_id, workspace=None) -> SqlTraceInfo:
-        sql_trace_info = (
+    def _get_sql_trace_info(
+        self, session: Session, trace_id: str, workspace: str | None = None
+    ) -> SqlTraceInfo:
+        sql_trace_info: SqlTraceInfo | None = (
             self
             ._trace_query(session, workspace=workspace)
             .filter(SqlTraceInfo.request_id == trace_id)
@@ -3897,9 +4011,9 @@ class SqlAlchemyStore(SqlAlchemyMCPServerRegistryMixin, SqlAlchemyGatewayStoreMi
     def _apply_trace_filter_clauses(
         self,
         statement: _SqlAlchemyStatement,
-        attribute_filters: list[ColumnElement],
+        attribute_filters: list[ColumnElement[bool]],
         non_attribute_filters: list[Subquery],
-        span_attribute_filters: list[ColumnElement],
+        span_attribute_filters: list[ColumnElement[bool]],
         span_filters: list[Subquery],
         run_id_filter: str | None,
     ) -> _SqlAlchemyStatement:
@@ -4239,7 +4353,7 @@ class SqlAlchemyStore(SqlAlchemyMCPServerRegistryMixin, SqlAlchemyGatewayStoreMi
 
         # Subquery: filter first traces using the parsed filter
         filtered_first_trace_metadata = aliased(SqlTraceMetadata)
-        filtered_trace_query = session.query(
+        filtered_trace_query: Query[Any] = session.query(
             filtered_first_trace_metadata.value.label("session_id")
         ).join(
             SqlTraceInfo,
@@ -4302,12 +4416,13 @@ class SqlAlchemyStore(SqlAlchemyMCPServerRegistryMixin, SqlAlchemyGatewayStoreMi
             )
         )
 
-        return (
+        stats_subquery: Subquery = (
             stats_query
             .filter(SqlTraceInfo.experiment_id == experiment_id)
             .group_by(session_metadata.value)
             .subquery()
         )
+        return stats_subquery
 
     def _build_completed_sessions_query(
         self,
@@ -4315,14 +4430,14 @@ class SqlAlchemyStore(SqlAlchemyMCPServerRegistryMixin, SqlAlchemyGatewayStoreMi
         sessions_with_stats: Subquery,
         max_last_trace_timestamp_ms: int,
         max_results: int | None,
-    ) -> Query:
+    ) -> Query[Any]:
         """
         Build main query for completed sessions.
 
         Returns sessions where last trace <= max timestamp, ordered by
         (last_trace_timestamp_ms ASC, session_id ASC) for deterministic pagination.
         """
-        query = (
+        query: Query[Any] = (
             session
             .query(
                 sessions_with_stats.c.session_id,
@@ -4346,7 +4461,9 @@ class SqlAlchemyStore(SqlAlchemyMCPServerRegistryMixin, SqlAlchemyGatewayStoreMi
 
         return query
 
-    def _validate_max_results_param(self, max_results: int, allow_null=False):
+    def _validate_max_results_param(
+        self, max_results: int | None, allow_null: bool = False
+    ) -> None:
         if (not allow_null and max_results is None) or (
             max_results is not None and max_results < 1
         ):
@@ -4376,7 +4493,7 @@ class SqlAlchemyStore(SqlAlchemyMCPServerRegistryMixin, SqlAlchemyGatewayStoreMi
         end_time_ms: int | None = None,
         max_results: int = MAX_RESULTS_QUERY_TRACE_METRICS,
         page_token: str | None = None,
-    ) -> PagedList[list[MetricDataPoint]]:
+    ) -> PagedList[MetricDataPoint]:
         validate_query_trace_metrics_params(view_type, metric_name, aggregations, dimensions)
 
         if time_interval_seconds and (start_time_ms is None or end_time_ms is None):
@@ -4413,7 +4530,7 @@ class SqlAlchemyStore(SqlAlchemyMCPServerRegistryMixin, SqlAlchemyGatewayStoreMi
             # TODO: Implement pagination with page_token
             return PagedList(data_points, None)
 
-    def set_trace_tag(self, trace_id: str, key: str, value: str):
+    def set_trace_tag(self, trace_id: str, key: str, value: str) -> None:
         """
         Set a tag on the trace with the given trace_id.
 
@@ -4427,7 +4544,7 @@ class SqlAlchemyStore(SqlAlchemyMCPServerRegistryMixin, SqlAlchemyGatewayStoreMi
             self._validate_trace_accessible(session, trace_id)
             session.merge(SqlTraceTag(request_id=trace_id, key=key, value=value))
 
-    def delete_trace_tag(self, trace_id: str, key: str):
+    def delete_trace_tag(self, trace_id: str, key: str) -> None:
         """
         Delete a tag on the trace with the given trace_id.
 
@@ -4535,7 +4652,8 @@ class SqlAlchemyStore(SqlAlchemyMCPServerRegistryMixin, SqlAlchemyGatewayStoreMi
                 .delete(synchronize_session=False)
             )
             self._delete_review_queue_items_for_traces(session, deleted_archived_trace_ids)
-        return deleted_db_backed_count + deleted_archived_count
+        total_deleted: int = deleted_db_backed_count + deleted_archived_count
+        return total_deleted
 
     def _delete_review_queue_items_for_traces(self, session: Session, trace_ids: list[str]) -> None:
         """Remove review-queue items pointing at traces that are being deleted.
@@ -4729,7 +4847,8 @@ class SqlAlchemyStore(SqlAlchemyMCPServerRegistryMixin, SqlAlchemyGatewayStoreMi
                     "due to a constraint violation.",
                     INTERNAL_ERROR,
                 ) from e
-            return sql_assessment.to_mlflow_entity()
+            created_assessment: Assessment = sql_assessment.to_mlflow_entity()
+            return created_assessment
 
     def get_assessment(self, trace_id: str, assessment_id: str) -> Assessment:
         """
@@ -4781,7 +4900,10 @@ class SqlAlchemyStore(SqlAlchemyMCPServerRegistryMixin, SqlAlchemyGatewayStoreMi
         """
         with self.ManagedSessionMaker(read_only=False) as session:
             existing_sql = self._get_sql_assessment(session, trace_id, assessment_id)
-            existing = existing_sql.to_mlflow_entity()
+            # NB: deliberately ``Any`` — the concrete assessment kind is decided by the
+            # isinstance dispatch below, and the entity hierarchy has no common mutable-value
+            # supertype narrower than ``Assessment`` to narrow from in the feedback branch.
+            existing: Any = existing_sql.to_mlflow_entity()
 
             if expectation is not None and feedback is not None:
                 raise MlflowException.invalid_parameter_value(
@@ -4806,6 +4928,7 @@ class SqlAlchemyStore(SqlAlchemyMCPServerRegistryMixin, SqlAlchemyGatewayStoreMi
 
             updated_timestamp = get_current_time_millis()
 
+            updated_assessment: Expectation | Feedback
             if isinstance(existing, Expectation):
                 new_value = expectation.value if expectation is not None else existing.value
 
@@ -4911,7 +5034,7 @@ class SqlAlchemyStore(SqlAlchemyMCPServerRegistryMixin, SqlAlchemyGatewayStoreMi
 
     def _get_sql_assessment(self, session, trace_id: str, assessment_id: str) -> SqlAssessments:
         """Helper method to get SqlAssessments object."""
-        sql_assessment = (
+        sql_assessment: SqlAssessments | None = (
             session
             .query(SqlAssessments)
             .filter(
@@ -5108,7 +5231,9 @@ class SqlAlchemyStore(SqlAlchemyMCPServerRegistryMixin, SqlAlchemyGatewayStoreMi
                 total_count=counts.total_count,
             )
 
-    def _build_trace_filter_subquery(self, session, experiment_ids: list[str], filter_string: str):
+    def _build_trace_filter_subquery(
+        self, session: Session, experiment_ids: list[str], filter_string: str
+    ) -> Select[Any]:
         """Build a subquery for traces that match a given filter in the specified experiments."""
         stmt = select(SqlTraceInfo.request_id).where(SqlTraceInfo.experiment_id.in_(experiment_ids))
 
@@ -5134,10 +5259,10 @@ class SqlAlchemyStore(SqlAlchemyMCPServerRegistryMixin, SqlAlchemyGatewayStoreMi
 
     def _get_trace_correlation_counts(
         self,
-        session,
+        session: Session,
         experiment_ids: list[str],
-        filter1_subquery,
-        filter2_subquery,
+        filter1_subquery: Select[Any],
+        filter2_subquery: Select[Any],
         base_filter: str | None = None,
     ) -> trace_correlation.TraceCorrelationCounts:
         """
@@ -5157,6 +5282,8 @@ class SqlAlchemyStore(SqlAlchemyMCPServerRegistryMixin, SqlAlchemyGatewayStoreMi
 
         # If base_filter is provided, use traces matching the base filter as the universe
         # Otherwise, use all traces in the experiments
+        # NB: either an aliased subquery or the ORM entity; SQLAlchemy accepts both.
+        base_table: Any
         if base_filter:
             base_subquery = self._build_trace_filter_subquery(session, experiment_ids, base_filter)
             base_subq = base_subquery.subquery()
@@ -5227,9 +5354,10 @@ class SqlAlchemyStore(SqlAlchemyMCPServerRegistryMixin, SqlAlchemyGatewayStoreMi
         """
         # Retry on DB deadlocks so a concurrent start_trace()/log_spans() race does not
         # drop metadata. Each attempt opens a fresh managed session.
-        return self._run_with_deadlock_retry(
+        logged_spans: list[Span] = self._run_with_deadlock_retry(
             self._log_spans_once, location, spans, tracking_uri=tracking_uri
         )
+        return logged_spans
 
     def _log_spans_once(self, location: str, spans: list[Span], tracking_uri=None) -> list[Span]:
         if not spans:
@@ -5593,7 +5721,9 @@ class SqlAlchemyStore(SqlAlchemyMCPServerRegistryMixin, SqlAlchemyGatewayStoreMi
                 # earliest start and latest end times across all spans.
                 # Skip if start_trace() has already written the authoritative timestamp
                 # and duration (indicated by TRACE_INFO_FINALIZED flag).
-                update_dict = {}
+                # Keys are ORM column attributes, values are SQL expressions or literals,
+                # matching what ``Query.update()`` accepts.
+                update_dict: dict[Any, Any] = {}
                 if trace_id not in finalized_trace_ids:
                     timestamp_update_expr = case(
                         (SqlTraceInfo.timestamp_ms > min_start_ms, min_start_ms),
@@ -5634,6 +5764,7 @@ class SqlAlchemyStore(SqlAlchemyMCPServerRegistryMixin, SqlAlchemyGatewayStoreMi
                 if aggregated_token_usage := agg.aggregated_token_usage:
                     existing_record = existing_token_usage.get(trace_id)
                     if trace_id not in finalized_trace_ids or not existing_record:
+                        trace_token_usage: dict[str, Any] | None
                         if trace_id in created_trace_ids:
                             trace_token_usage = aggregated_token_usage
                         else:
@@ -5659,6 +5790,7 @@ class SqlAlchemyStore(SqlAlchemyMCPServerRegistryMixin, SqlAlchemyGatewayStoreMi
                 if aggregated_cost := agg.aggregated_cost:
                     existing_record = existing_cost.get(trace_id)
                     if trace_id not in finalized_trace_ids or not existing_record:
+                        recorded_cost: dict[str, Any] | None
                         if trace_id in created_trace_ids:
                             recorded_cost = aggregated_cost
                         else:
@@ -5788,7 +5920,8 @@ class SqlAlchemyStore(SqlAlchemyMCPServerRegistryMixin, SqlAlchemyGatewayStoreMi
         Returns:
             Dictionary of update attributes
         """
-        update_dict = {}
+        # NB: keys are ORM column attributes, matching what ``Query.update()`` accepts.
+        update_dict: dict[Any, Any] = {}
         try:
             if sql_trace_info.request_preview is None and (
                 trace_inputs := span_dict.get("attributes", {}).get(SpanAttributeKey.INPUTS)
@@ -6213,7 +6346,9 @@ class SqlAlchemyStore(SqlAlchemyMCPServerRegistryMixin, SqlAlchemyGatewayStoreMi
         # Group archive-now experiments by cutoff so experiments requesting the same urgency
         # can share a candidate query instead of scanning one experiment at a time.
         archive_now_cutoff_groups: dict[int | None, list[str]] = defaultdict(list)
-        regular_cutoff_groups: dict[int, list[str]] = defaultdict(list)
+        # Keys are always populated with integer cutoffs; the optional-key shape matches
+        # the shared ``_collect_grouped_trace_archive_candidates`` contract.
+        regular_cutoff_groups: dict[int | None, list[str]] = defaultdict(list)
         for experiment_id, experiment_tags in self._get_active_experiment_trace_archival_tags(
             session
         ):
@@ -6333,7 +6468,8 @@ class SqlAlchemyStore(SqlAlchemyMCPServerRegistryMixin, SqlAlchemyGatewayStoreMi
         This small wrapper exists so tests can freeze the scheduler clock without
         patching the shared time utility.
         """
-        return get_current_time_millis()
+        now_millis: int = get_current_time_millis()
+        return now_millis
 
     def _resolve_effective_trace_archival_retention_millis(
         self,
@@ -6385,7 +6521,9 @@ class SqlAlchemyStore(SqlAlchemyMCPServerRegistryMixin, SqlAlchemyGatewayStoreMi
 
         experiments: list[tuple[str, dict[str, str]]] = []
         current_experiment_id: str | None = None
-        current_tags: dict[str, str] | None = None
+        # Always holds the tags dict appended to ``experiments`` for the current group;
+        # never observable as empty-and-detached because the first row opens a group.
+        current_tags: dict[str, str] = {}
         for experiment_id, key, value in rows:
             experiment_id = str(experiment_id)
             if experiment_id != current_experiment_id:
@@ -6957,7 +7095,7 @@ class SqlAlchemyStore(SqlAlchemyMCPServerRegistryMixin, SqlAlchemyGatewayStoreMi
                     f"Trace {trace_info.trace_id} is not fully exported yet, "
                     f"expecting {num_spans} spans but got {len(span_snapshots)}"
                 )
-                return
+                return None
 
         # Defer OTel Span reconstruction until a caller needs properties or
         # to_otel_proto(). Callers that only need dicts (e.g. TraceData.to_dict /
@@ -7040,8 +7178,10 @@ class SqlAlchemyStore(SqlAlchemyMCPServerRegistryMixin, SqlAlchemyGatewayStoreMi
     def _search_entity_associations(
         self,
         entity_ids: str | list[str],
-        entity_type: EntityAssociationType,
-        target_type: EntityAssociationType,
+        # NB: plain `str`, not EntityAssociationType — the constants class is not an
+        # Enum, so annotating it here conflicts with callers passing other strings.
+        entity_type: str,
+        target_type: str,
         search_direction: str,  # "forward" or "reverse"
         max_results: int | None = None,
         page_token: str | None = None,
@@ -7112,8 +7252,10 @@ class SqlAlchemyStore(SqlAlchemyMCPServerRegistryMixin, SqlAlchemyGatewayStoreMi
     def search_entities_by_source(
         self,
         source_ids: str | list[str],
-        source_type: EntityAssociationType,
-        destination_type: EntityAssociationType,
+        # NB: plain `str`, not EntityAssociationType — the constants class is not an
+        # Enum (same convention as `_filter_entity_ids`).
+        source_type: str,
+        destination_type: str,
         max_results: int | None = None,
         page_token: str | None = None,
     ) -> PagedList[str]:
@@ -7138,8 +7280,10 @@ class SqlAlchemyStore(SqlAlchemyMCPServerRegistryMixin, SqlAlchemyGatewayStoreMi
     def search_entities_by_destination(
         self,
         destination_ids: str | list[str],
-        destination_type: EntityAssociationType,
-        source_type: EntityAssociationType,
+        # NB: plain `str`, not EntityAssociationType — the constants class is not an
+        # Enum (same convention as `_filter_entity_ids`).
+        destination_type: str,
+        source_type: str,
         max_results: int | None = None,
         page_token: str | None = None,
     ) -> PagedList[str]:
@@ -7284,7 +7428,8 @@ class SqlAlchemyStore(SqlAlchemyMCPServerRegistryMixin, SqlAlchemyGatewayStoreMi
                     RESOURCE_DOES_NOT_EXIST,
                 )
 
-            return sql_dataset.to_mlflow_entity()
+            entity: EvaluationDataset = sql_dataset.to_mlflow_entity()
+            return entity
 
     def delete_dataset(self, dataset_id: str) -> None:
         """
@@ -7389,7 +7534,11 @@ class SqlAlchemyStore(SqlAlchemyMCPServerRegistryMixin, SqlAlchemyGatewayStoreMi
 
             return PagedList(datasets, next_page_token)
 
-    def _update_dataset_schema(self, existing_schema_json, record_dicts):
+    def _update_dataset_schema(
+        self,
+        existing_schema_json: str | None,
+        record_dicts: list[dict[str, Any]],
+    ) -> dict[str, Any] | None:
         """
         Update dataset schema with new fields from records.
         This method combines schema computation and merging into a single operation
@@ -7433,7 +7582,7 @@ class SqlAlchemyStore(SqlAlchemyMCPServerRegistryMixin, SqlAlchemyGatewayStoreMi
 
         return schema
 
-    def _compute_dataset_profile(self, session, dataset_id):
+    def _compute_dataset_profile(self, session: Session, dataset_id: str) -> dict[str, int] | None:
         """
         Compute profile statistics for the dataset based on current state.
 
@@ -7456,7 +7605,7 @@ class SqlAlchemyStore(SqlAlchemyMCPServerRegistryMixin, SqlAlchemyGatewayStoreMi
 
         return {"num_records": total_records}
 
-    def _infer_field_type(self, value):
+    def _infer_field_type(self, value: Any) -> str:
         """
         Infer the type of a field value.
 
@@ -7527,12 +7676,12 @@ class SqlAlchemyStore(SqlAlchemyMCPServerRegistryMixin, SqlAlchemyGatewayStoreMi
                 try:
                     decoded = base64.b64decode(page_token.encode()).decode()
                     last_created_time, last_record_id = decoded.split(":", 1)
-                    last_created_time = int(last_created_time)
+                    cursor_created_time = int(last_created_time)
 
                     query = query.filter(
-                        (SqlEvaluationDatasetRecord.created_time > last_created_time)
+                        (SqlEvaluationDatasetRecord.created_time > cursor_created_time)
                         | (
-                            (SqlEvaluationDatasetRecord.created_time == last_created_time)
+                            (SqlEvaluationDatasetRecord.created_time == cursor_created_time)
                             & (SqlEvaluationDatasetRecord.dataset_record_id > last_record_id)
                         )
                     )
@@ -7715,7 +7864,7 @@ class SqlAlchemyStore(SqlAlchemyMCPServerRegistryMixin, SqlAlchemyGatewayStoreMi
         with self.ManagedSessionMaker(read_only=False) as session:
             self._validate_dataset_accessible(session, dataset_id)
 
-            deleted_count = (
+            deleted_count: int = (
                 session
                 .query(SqlEvaluationDatasetRecord)
                 .filter(
@@ -7969,7 +8118,8 @@ class SqlAlchemyStore(SqlAlchemyMCPServerRegistryMixin, SqlAlchemyGatewayStoreMi
             dataset.last_update_time = get_current_time_millis()
             session.commit()
 
-            return dataset.to_mlflow_entity()
+            entity: EvaluationDataset = dataset.to_mlflow_entity()
+            return entity
 
     def remove_dataset_from_experiments(
         self, dataset_id: str, experiment_ids: list[str]
@@ -8021,7 +8171,8 @@ class SqlAlchemyStore(SqlAlchemyMCPServerRegistryMixin, SqlAlchemyGatewayStoreMi
 
             session.commit()
 
-            return dataset.to_mlflow_entity()
+            entity: EvaluationDataset = dataset.to_mlflow_entity()
+            return entity
 
     # ===================================================================================
     # Issue Methods
@@ -8111,7 +8262,8 @@ class SqlAlchemyStore(SqlAlchemyMCPServerRegistryMixin, SqlAlchemyGatewayStoreMi
                     error_code=RESOURCE_DOES_NOT_EXIST,
                 )
 
-            return sql_issue.to_mlflow_entity()
+            entity: Issue = sql_issue.to_mlflow_entity()
+            return entity
 
     @record_usage_event(UpdateIssueEvent)
     def update_issue(
@@ -8161,7 +8313,8 @@ class SqlAlchemyStore(SqlAlchemyMCPServerRegistryMixin, SqlAlchemyGatewayStoreMi
 
             session.flush()
 
-            return sql_issue.to_mlflow_entity()
+            entity: Issue = sql_issue.to_mlflow_entity()
+            return entity
 
     def search_issues(
         self,
@@ -8287,7 +8440,7 @@ class SqlAlchemyStore(SqlAlchemyMCPServerRegistryMixin, SqlAlchemyGatewayStoreMi
         Raises:
             MlflowException: If entity not found (RESOURCE_DOES_NOT_EXIST).
         """
-        obj = self._get_query(session, model_class).filter_by(**filters).first()
+        obj: _T = self._get_query(session, model_class).filter_by(**filters).first()
         if not obj:
             filter_str = ", ".join(f"{k}='{v}'" for k, v in filters.items())
             raise MlflowException(
@@ -8375,7 +8528,9 @@ class SqlAlchemyStore(SqlAlchemyMCPServerRegistryMixin, SqlAlchemyGatewayStoreMi
 
         return resolved
 
-    def _cleanup_endpoint_bindings(self, session, resource_type: str, resource_id: str):
+    def _cleanup_endpoint_bindings(
+        self, session: Session, resource_type: str, resource_id: str
+    ) -> None:
         """
         Delete all endpoint bindings for a resource.
 
@@ -8429,10 +8584,12 @@ class SqlAlchemyStore(SqlAlchemyMCPServerRegistryMixin, SqlAlchemyGatewayStoreMi
     # dataclasses and validation rules.
     # ------------------------------------------------------------------
 
-    def _label_schema_query(self, session):
+    def _label_schema_query(self, session: Session):
+        # NB: return type deliberately unannotated — legacy ``Sql*`` row fetcher
+        # (models.py ``Mapped[]`` SEAM, see swarm notes).
         return self._get_query(session, SqlLabelSchema)
 
-    def _validate_experiment_exists(self, session, experiment_id):
+    def _validate_experiment_exists(self, session: Session, experiment_id: str) -> None:
         # Use the canonical helper so we get lifecycle filtering (label
         # schemas can't be created against soft-deleted experiments) and
         # consistent INVALID_PARAMETER_VALUE on non-integer IDs.
@@ -8440,14 +8597,14 @@ class SqlAlchemyStore(SqlAlchemyMCPServerRegistryMixin, SqlAlchemyGatewayStoreMi
 
     def create_label_schema(
         self,
-        experiment_id,
+        experiment_id: str,
         *,
-        name,
-        type,
-        input,
-        instruction=None,
-        enable_comment=False,
-    ):
+        name: str,
+        type: Literal["feedback", "expectation"],
+        input: InputType,
+        instruction: str | None = None,
+        enable_comment: bool = False,
+    ) -> LabelSchema:
         from mlflow.genai.label_schemas.label_schemas import LabelSchema, LabelSchemaType
         from mlflow.genai.label_schemas.validation import validate_schema_for_create
 
@@ -8501,9 +8658,10 @@ class SqlAlchemyStore(SqlAlchemyMCPServerRegistryMixin, SqlAlchemyGatewayStoreMi
                     f"'{experiment_id}'.",
                     error_code=RESOURCE_ALREADY_EXISTS,
                 ) from e
-            return sql_schema.to_mlflow_entity()
+            result: LabelSchema = sql_schema.to_mlflow_entity()
+            return result
 
-    def get_label_schema(self, schema_id):
+    def get_label_schema(self, schema_id: str) -> LabelSchema:
         with self.ManagedSessionMaker() as session:
             sql_schema = (
                 self
@@ -8516,9 +8674,10 @@ class SqlAlchemyStore(SqlAlchemyMCPServerRegistryMixin, SqlAlchemyGatewayStoreMi
                     f"Label schema with id '{schema_id}' not found.",
                     error_code=RESOURCE_DOES_NOT_EXIST,
                 )
-            return sql_schema.to_mlflow_entity()
+            entity: LabelSchema = sql_schema.to_mlflow_entity()
+            return entity
 
-    def get_label_schema_by_name(self, experiment_id, name):
+    def get_label_schema_by_name(self, experiment_id: str, name: str) -> LabelSchema:
         with self.ManagedSessionMaker() as session:
             # Validate via the canonical helper so a non-integer experiment ID
             # raises INVALID_PARAMETER_VALUE (rather than a raw ValueError from
@@ -8538,9 +8697,15 @@ class SqlAlchemyStore(SqlAlchemyMCPServerRegistryMixin, SqlAlchemyGatewayStoreMi
                     f"Label schema with name '{name}' not found for experiment '{experiment_id}'.",
                     error_code=RESOURCE_DOES_NOT_EXIST,
                 )
-            return sql_schema.to_mlflow_entity()
+            entity: LabelSchema = sql_schema.to_mlflow_entity()
+            return entity
 
-    def list_label_schemas(self, experiment_id, max_results=100, page_token=None):
+    def list_label_schemas(
+        self,
+        experiment_id: str,
+        max_results: int = 100,
+        page_token: str | None = None,
+    ) -> PagedList[LabelSchema]:
         self._validate_max_results_param(max_results)
         offset = SearchUtils.parse_start_offset_from_page_token(page_token) if page_token else 0
         # Writable session: the protected default question is seeded lazily on
@@ -8571,13 +8736,13 @@ class SqlAlchemyStore(SqlAlchemyMCPServerRegistryMixin, SqlAlchemyGatewayStoreMi
 
     def update_label_schema(
         self,
-        schema_id,
+        schema_id: str,
         *,
-        name=None,
-        instruction=None,
-        enable_comment=None,
-        input=None,
-    ):
+        name: str | None = None,
+        instruction: str | None = None,
+        enable_comment: bool | None = None,
+        input: InputType | None = None,
+    ) -> LabelSchema:
         # Sparse update; ``type`` is immutable post-create and is not
         # accepted. Rename collisions are detected before the write.
         from mlflow.genai.label_schemas.validation import validate_schema_for_update
@@ -8644,9 +8809,10 @@ class SqlAlchemyStore(SqlAlchemyMCPServerRegistryMixin, SqlAlchemyGatewayStoreMi
                     f"experiment '{sql_schema.experiment_id}'.",
                     error_code=RESOURCE_ALREADY_EXISTS,
                 ) from e
-            return sql_schema.to_mlflow_entity()
+            entity: LabelSchema = sql_schema.to_mlflow_entity()
+            return entity
 
-    def delete_label_schema(self, schema_id):
+    def delete_label_schema(self, schema_id: str) -> None:
         # No-op when the schema doesn't exist. Assessments whose ``name``
         # matches this schema retain their data and render as free-form
         # values in the UI after deletion (soft reference).
@@ -8667,7 +8833,7 @@ class SqlAlchemyStore(SqlAlchemyMCPServerRegistryMixin, SqlAlchemyGatewayStoreMi
                 )
             session.delete(sql_schema)
 
-    def _ensure_default_label_schema(self, session, experiment_id):
+    def _ensure_default_label_schema(self, session: Session, experiment_id: str) -> None:
         """Seed the experiment's protected default question if it's absent.
 
         The default question is a FEEDBACK free-text schema named
@@ -8736,10 +8902,12 @@ class SqlAlchemyStore(SqlAlchemyMCPServerRegistryMixin, SqlAlchemyGatewayStoreMi
     # workspace-validated `queue_id`, so they inherit that scope.
     # ------------------------------------------------------------------
 
-    def _review_queue_query(self, session):
+    def _review_queue_query(self, session: Session):
+        # NB: return type deliberately unannotated — legacy ``Sql*`` row fetcher
+        # (models.py ``Mapped[]`` SEAM, see swarm notes).
         return self._get_query(session, SqlReviewQueue)
 
-    def _get_sql_review_queue(self, session, queue_id, *, for_update=False):
+    def _get_sql_review_queue(self, session: Session, queue_id: str, *, for_update: bool = False):
         """Fetch the workspace-scoped queue row or raise RESOURCE_DOES_NOT_EXIST.
 
         Pass ``for_update=True`` from mutating paths (attaching items, editing
@@ -8760,12 +8928,14 @@ class SqlAlchemyStore(SqlAlchemyMCPServerRegistryMixin, SqlAlchemyGatewayStoreMi
             )
         return sql_queue
 
-    def _load_users_by_queue(self, session, queue_ids):
+    def _load_users_by_queue(self, session: Session, queue_ids: list[str]) -> dict[str, list[str]]:
         """Map queue_id -> ordered list of assigned users for the given queues."""
-        users_by_queue = {queue_id: [] for queue_id in queue_ids}
+        users_by_queue: dict[str, list[str]] = {queue_id: [] for queue_id in queue_ids}
         if not queue_ids:
             return users_by_queue
-        rows = (
+        # NB: rows treated dynamically — a typed list makes the legacy Column-typed
+        # attributes fail dict/list operations that only models.py Mapped[] fixes.
+        rows: list[Any] = (
             session
             .query(SqlReviewQueueUser)
             .filter(SqlReviewQueueUser.queue_id.in_(queue_ids))
@@ -8776,12 +8946,15 @@ class SqlAlchemyStore(SqlAlchemyMCPServerRegistryMixin, SqlAlchemyGatewayStoreMi
             users_by_queue[row.queue_id].append(row.user_id)
         return users_by_queue
 
-    def _load_schema_ids_by_queue(self, session, queue_ids):
+    def _load_schema_ids_by_queue(
+        self, session: Session, queue_ids: list[str]
+    ) -> dict[str, list[str]]:
         """Map queue_id -> ordered list of attached schema ids for the queues."""
-        schemas_by_queue = {queue_id: [] for queue_id in queue_ids}
+        schemas_by_queue: dict[str, list[str]] = {queue_id: [] for queue_id in queue_ids}
         if not queue_ids:
             return schemas_by_queue
-        rows = (
+        # NB: rows treated dynamically — see _load_users_by_queue.
+        rows: list[Any] = (
             session
             .query(SqlReviewQueueLabelSchema)
             .filter(SqlReviewQueueLabelSchema.queue_id.in_(queue_ids))
@@ -8792,7 +8965,13 @@ class SqlAlchemyStore(SqlAlchemyMCPServerRegistryMixin, SqlAlchemyGatewayStoreMi
             schemas_by_queue[row.queue_id].append(row.schema_id)
         return schemas_by_queue
 
-    def _hydrate_review_queues(self, session, sql_queues):
+    def _hydrate_review_queues(
+        self,
+        session: Session,
+        # NB: ``SqlReviewQueue`` rows left untyped — a typed list surfaces
+        # Column-keyed dict lookups that only the models.py Mapped[] migration dissolves.
+        sql_queues,
+    ) -> list[ReviewQueue]:
         """Convert queue rows to entities, batch-loading their association sets."""
         queue_ids = [q.queue_id for q in sql_queues]
         users_by_queue = self._load_users_by_queue(session, queue_ids)
@@ -8805,7 +8984,9 @@ class SqlAlchemyStore(SqlAlchemyMCPServerRegistryMixin, SqlAlchemyGatewayStoreMi
             for q in sql_queues
         ]
 
-    def _validate_schema_ids_exist(self, session, experiment_id, schema_ids):
+    def _validate_schema_ids_exist(
+        self, session: Session, experiment_id: str, schema_ids: list[str]
+    ) -> None:
         """Raise INVALID_PARAMETER_VALUE if any schema id isn't in the experiment.
 
         ``review_queue_label_schemas.schema_id`` is a soft reference (no foreign
@@ -8834,14 +9015,14 @@ class SqlAlchemyStore(SqlAlchemyMCPServerRegistryMixin, SqlAlchemyGatewayStoreMi
 
     def create_review_queue(
         self,
-        experiment_id,
+        experiment_id: str,
         *,
-        name,
-        queue_type,
-        created_by=None,
-        users=None,
-        schema_ids=None,
-    ):
+        name: str,
+        queue_type: Literal["user", "custom"],
+        created_by: str | None = None,
+        users: list[str] | None = None,
+        schema_ids: list[str] | None = None,
+    ) -> ReviewQueue:
         from mlflow.genai.review_queues.validation import validate_queue_for_create
 
         validated = validate_queue_for_create(
@@ -8947,9 +9128,10 @@ class SqlAlchemyStore(SqlAlchemyMCPServerRegistryMixin, SqlAlchemyGatewayStoreMi
                     SqlReviewQueueLabelSchema(queue_id=sql_queue.queue_id, schema_id=schema_id)
                 )
             session.flush()
-            return self._hydrate_review_queues(session, [sql_queue])[0]
+            queue: ReviewQueue = self._hydrate_review_queues(session, [sql_queue])[0]
+            return queue
 
-    def get_or_create_user_queue(self, experiment_id, *, user):
+    def get_or_create_user_queue(self, experiment_id: str, *, user: str) -> ReviewQueue:
         from mlflow.genai.review_queues import ReviewQueueType
         from mlflow.genai.review_queues.validation import normalize_user
 
@@ -8978,12 +9160,13 @@ class SqlAlchemyStore(SqlAlchemyMCPServerRegistryMixin, SqlAlchemyGatewayStoreMi
                 ) from e
             return existing
 
-    def get_review_queue(self, queue_id):
+    def get_review_queue(self, queue_id: str) -> ReviewQueue:
         with self.ManagedSessionMaker() as session:
             sql_queue = self._get_sql_review_queue(session, queue_id)
-            return self._hydrate_review_queues(session, [sql_queue])[0]
+            queue: ReviewQueue = self._hydrate_review_queues(session, [sql_queue])[0]
+            return queue
 
-    def get_review_queue_by_name(self, experiment_id, *, name):
+    def get_review_queue_by_name(self, experiment_id: str, *, name: str) -> ReviewQueue:
         with self.ManagedSessionMaker() as session:
             self._validate_experiment_exists(session, experiment_id)
             sql_queue = (
@@ -9001,11 +9184,18 @@ class SqlAlchemyStore(SqlAlchemyMCPServerRegistryMixin, SqlAlchemyGatewayStoreMi
                     f"Review queue with name '{name}' not found for experiment '{experiment_id}'.",
                     error_code=RESOURCE_DOES_NOT_EXIST,
                 )
-            return self._hydrate_review_queues(session, [sql_queue])[0]
+            queue: ReviewQueue = self._hydrate_review_queues(session, [sql_queue])[0]
+            return queue
 
     def list_review_queues(
-        self, experiment_id, *, user=None, item_id=None, max_results=None, page_token=None
-    ):
+        self,
+        experiment_id: str,
+        *,
+        user: str | None = None,
+        item_id: str | None = None,
+        max_results: int | None = None,
+        page_token: str | None = None,
+    ) -> PagedList[ReviewQueue]:
         from mlflow.genai.review_queues.validation import normalize_user
 
         if max_results is None:
@@ -9053,8 +9243,14 @@ class SqlAlchemyStore(SqlAlchemyMCPServerRegistryMixin, SqlAlchemyGatewayStoreMi
             return PagedList(self._hydrate_review_queues(session, results), next_token)
 
     def update_review_queue(
-        self, queue_id, *, users=None, schema_ids=None, name=None, new_owner=None
-    ):
+        self,
+        queue_id: str,
+        *,
+        users: list[str] | None = None,
+        schema_ids: list[str] | None = None,
+        name: str | None = None,
+        new_owner: str | None = None,
+    ) -> ReviewQueue:
         from mlflow.genai.review_queues import ReviewQueueType
         from mlflow.genai.review_queues.validation import (
             normalize_schema_ids,
@@ -9073,7 +9269,8 @@ class SqlAlchemyStore(SqlAlchemyMCPServerRegistryMixin, SqlAlchemyGatewayStoreMi
                 )
 
             if users is None and schema_ids is None and name is None and new_owner is None:
-                return self._hydrate_review_queues(session, [sql_queue])[0]
+                queue: ReviewQueue = self._hydrate_review_queues(session, [sql_queue])[0]
+                return queue
 
             if new_owner is not None:
                 # Owner reassignment; authorization (MANAGE-only) is enforced at
@@ -9153,9 +9350,10 @@ class SqlAlchemyStore(SqlAlchemyMCPServerRegistryMixin, SqlAlchemyGatewayStoreMi
                     "(names are case-insensitive).",
                     error_code=RESOURCE_ALREADY_EXISTS,
                 ) from e
-            return self._hydrate_review_queues(session, [sql_queue])[0]
+            updated_queue: ReviewQueue = self._hydrate_review_queues(session, [sql_queue])[0]
+            return updated_queue
 
-    def delete_review_queue(self, queue_id):
+    def delete_review_queue(self, queue_id: str) -> None:
         # No-op when the queue doesn't exist. Child rows (users, items,
         # schemas) are deleted explicitly so the behaviour doesn't depend on
         # DB-level ON DELETE CASCADE being honoured by the active dialect.
@@ -9180,7 +9378,13 @@ class SqlAlchemyStore(SqlAlchemyMCPServerRegistryMixin, SqlAlchemyGatewayStoreMi
                 ).delete(synchronize_session=False)
             session.delete(sql_queue)
 
-    def add_items_to_review_queue(self, queue_id, *, item_ids, item_type="trace"):
+    def add_items_to_review_queue(
+        self,
+        queue_id: str,
+        *,
+        item_ids: list[str],
+        item_type: Literal["trace"] = "trace",
+    ) -> list[ReviewQueueItem]:
         from mlflow.genai.review_queues import ReviewStatus
         from mlflow.genai.review_queues.validation import (
             coerce_item_type,
@@ -9252,7 +9456,7 @@ class SqlAlchemyStore(SqlAlchemyMCPServerRegistryMixin, SqlAlchemyGatewayStoreMi
                 if item_id in rows_by_item
             ]
 
-    def remove_items_from_review_queue(self, queue_id, *, item_ids):
+    def remove_items_from_review_queue(self, queue_id: str, *, item_ids: list[str]) -> None:
         from mlflow.genai.review_queues.validation import validate_item_ids_for_attach
 
         normalized_item_ids = validate_item_ids_for_attach(item_ids)
@@ -9263,7 +9467,14 @@ class SqlAlchemyStore(SqlAlchemyMCPServerRegistryMixin, SqlAlchemyGatewayStoreMi
                 SqlReviewQueueItem.item_id.in_(normalized_item_ids),
             ).delete(synchronize_session=False)
 
-    def list_review_queue_items(self, queue_id, *, status=None, max_results=None, page_token=None):
+    def list_review_queue_items(
+        self,
+        queue_id: str,
+        *,
+        status: Literal["pending", "complete", "declined"] | None = None,
+        max_results: int | None = None,
+        page_token: str | None = None,
+    ) -> PagedList[ReviewQueueItem]:
         from mlflow.genai.review_queues.validation import coerce_status
 
         if max_results is None:
@@ -9298,7 +9509,14 @@ class SqlAlchemyStore(SqlAlchemyMCPServerRegistryMixin, SqlAlchemyGatewayStoreMi
                 next_token = SearchUtils.create_page_token(offset + max_results)
             return PagedList([row.to_mlflow_entity() for row in results], next_token)
 
-    def set_review_queue_item_status(self, queue_id, *, item_id, status, completed_by=None):
+    def set_review_queue_item_status(
+        self,
+        queue_id: str,
+        *,
+        item_id: str,
+        status: Literal["pending", "complete", "declined"],
+        completed_by: str | None = None,
+    ) -> ReviewQueueItem:
         from mlflow.genai.review_queues import ReviewStatus
         from mlflow.genai.review_queues.validation import (
             USER_MAX_LENGTH,
@@ -9356,7 +9574,8 @@ class SqlAlchemyStore(SqlAlchemyMCPServerRegistryMixin, SqlAlchemyGatewayStoreMi
             # status transition (e.g. complete -> declined, or a reopen) is a real
             # change and still re-records the actor below.
             if row.status == str(new_status):
-                return row.to_mlflow_entity()
+                item: ReviewQueueItem = row.to_mlflow_entity()
+                return item
 
             now_ms = get_current_time_millis()
             row.status = str(new_status)
@@ -9370,7 +9589,8 @@ class SqlAlchemyStore(SqlAlchemyMCPServerRegistryMixin, SqlAlchemyGatewayStoreMi
                 row.completed_by = normalized_completed_by
                 row.completed_time_ms = now_ms
             session.flush()
-            return row.to_mlflow_entity()
+            updated_item: ReviewQueueItem = row.to_mlflow_entity()
+            return updated_item
 
 
 def _get_sqlalchemy_filter_clauses(parsed, session, dialect):
@@ -9477,16 +9697,20 @@ def _get_sqlalchemy_filter_clauses(parsed, session, dialect):
     return attribute_filters, non_attribute_filters, dataset_filters
 
 
-def _get_orderby_clauses(order_by_list, session):
+def _get_orderby_clauses(
+    order_by_list: list[str] | None, session: Session
+) -> tuple[list[ColumnElement[Any]], list[ColumnElement[Any] | str], list[Subquery]]:
     """Sorts a set of runs based on their natural ordering and an overriding set of order_bys.
     Runs are naturally ordered first by start time descending, then by run id for tie-breaking.
     """
 
-    clauses = []
-    ordering_joins = []
+    # The sort-key list mixes string CASE labels with column expressions; SQLAlchemy accepts
+    # both in ORDER BY.
+    clauses: list[ColumnElement[Any] | str] = []
+    ordering_joins: list[Subquery] = []
     clause_id = 0
     observed_order_by_clauses = set()
-    select_clauses = []
+    select_clauses: list[ColumnElement[Any]] = []
     # contrary to filters, it is not easily feasible to separately handle sorting
     # on attributes and on joined tables as we must keep all clauses in the same order
     if order_by_list:
@@ -9636,14 +9860,14 @@ _TRACE_INFO_COLUMNS = tuple(SqlTraceInfo.__table__.columns)
 _TRACE_CHILD_QUERY_BATCH_SIZE = 500
 
 
-def _build_trace_infos_from_rows(session, trace_rows):
+def _build_trace_infos_from_rows(session, trace_rows) -> list[TraceInfo]:
     if not trace_rows:
         return []
 
     trace_ids = [row.request_id for row in trace_rows]
-    tags_by_trace = defaultdict(dict)
-    metadata_by_trace = defaultdict(dict)
-    assessments_by_trace = defaultdict(list)
+    tags_by_trace: defaultdict[str, dict[str, str]] = defaultdict(dict)
+    metadata_by_trace: defaultdict[str, dict[str, str]] = defaultdict(dict)
+    assessments_by_trace: defaultdict[str, list[Assessment]] = defaultdict(list)
     for trace_id_batch in chunk_list(trace_ids, _TRACE_CHILD_QUERY_BATCH_SIZE):
         for trace_id, key, value in session.execute(
             select(SqlTraceTag.request_id, SqlTraceTag.key, SqlTraceTag.value).where(
@@ -9713,7 +9937,9 @@ def _get_orderby_clauses_for_search_traces(order_by_list: list[str], session):
     """Sorts a set of traces based on their natural ordering and an overriding set of order_bys.
     Traces are ordered first by timestamp_ms descending, then by trace_id for tie-breaking.
     """
-    clauses = []
+    # A mix of SQL column labels/expressions and plain strings (case names), so the
+    # element type is intentionally loose.
+    clauses: list[Any] = []
     ordering_joins = []
     observed_order_by_clauses = set()
     select_clauses = []
@@ -9749,10 +9975,11 @@ def _get_orderby_clauses_for_search_traces(order_by_list: list[str], session):
         clauses.append(order_value if ascending else order_value.desc())
 
     # Add descending trace start time as default ordering and a tie-breaker
-    for attr, ascending in [
+    default_order_bys: list[tuple[ColumnElement[Any], bool]] = [
         (SqlTraceInfo.timestamp_ms, False),
         (SqlTraceInfo.request_id, True),
-    ]:
+    ]
+    for attr, ascending in default_order_bys:
         if (
             SearchTraceUtils._ATTRIBUTE_IDENTIFIER,
             attr.key,
@@ -10209,7 +10436,7 @@ class _TraceAggregate:
 _LOG_SPANS_MAX_TRACE_CREATE_RETRIES = 10
 
 
-def _bulk_upsert(session: Session, model_class: type, rows: list[dict[str, Any]]) -> None:
+def _bulk_upsert(session: Session, model_class: type[Any], rows: list[dict[str, Any]]) -> None:
     """Bulk upsert rows using dialect-specific INSERT ON CONFLICT.
 
     Rows are inserted in batches to stay within database limits (e.g., SQLite's

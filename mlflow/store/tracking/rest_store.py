@@ -1,13 +1,17 @@
 import functools
 import json
 import logging
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING, Any, Callable, ClassVar, Literal
 
 from mlflow.entities.model_registry.prompt_version import PromptVersion
 
 if TYPE_CHECKING:
-    from mlflow.entities import DatasetRecord, EvaluationDataset
+    from mlflow.entities.dataset_record import DatasetRecord
+    from mlflow.entities.evaluation_dataset import EvaluationDataset
+    from mlflow.genai.label_schemas.label_schemas import InputType, LabelSchema
+    from mlflow.genai.review_queues import ReviewQueue, ReviewQueueItem
     from mlflow.genai.scorers.online.entities import OnlineScoringConfig
+    from mlflow.models import Model
 
 from opentelemetry.proto.collector.trace.v1.trace_service_pb2 import ExportTraceServiceRequest
 from packaging.version import Version
@@ -15,6 +19,7 @@ from packaging.version import Version
 from mlflow.entities import (
     DatasetInput,
     Experiment,
+    ExperimentTag,
     Issue,
     LoggedModel,
     LoggedModelInput,
@@ -23,8 +28,10 @@ from mlflow.entities import (
     LoggedModelStatus,
     LoggedModelTag,
     Metric,
+    Param,
     Run,
     RunInfo,
+    RunTag,
     ScorerVersion,
     ViewType,
 )
@@ -34,7 +41,11 @@ from mlflow.exceptions import MlflowNotImplementedException
 # Constants for Databricks API disabled decorator
 _DATABRICKS_DATASET_API_NAME = "Evaluation dataset APIs"
 _DATABRICKS_DATASET_ALTERNATIVE = "Use the databricks-agents library for dataset operations."
-from mlflow.entities.assessment import Assessment, Expectation, Feedback
+from mlflow.entities.assessment import (
+    Assessment,
+    ExpectationValue,
+    FeedbackValue,
+)
 from mlflow.entities.span import Span
 from mlflow.entities.trace import Trace
 from mlflow.entities.trace_data import TraceData
@@ -207,13 +218,19 @@ class RestStore(
             is a function so that we can obtain fresh credentials in the case of expiry.
     """
 
-    _METHOD_TO_INFO = extract_api_info_for_service(MlflowService, _REST_API_PATH_PREFIX)
-    _V3_METHOD_TO_INFO = extract_api_info_for_service(MlflowService, _V3_REST_API_PATH_PREFIX)
+    # Keys are generated proto request-message classes; protobuf ships no stubs in the
+    # lint environment, so `Any` is the honest type for them (see `_call_endpoint`).
+    _METHOD_TO_INFO: ClassVar[dict[Any, tuple[str, str]]] = extract_api_info_for_service(
+        MlflowService, _REST_API_PATH_PREFIX
+    )
+    _V3_METHOD_TO_INFO: ClassVar[dict[Any, tuple[str, str]]] = extract_api_info_for_service(
+        MlflowService, _V3_REST_API_PATH_PREFIX
+    )
 
     # Set of v3 APIs - includes Gateway APIs from mixin
-    _V3_APIS = RestGatewayStoreMixin._V3_GATEWAY_APIS
+    _V3_APIS: ClassVar[set[Any]] = RestGatewayStoreMixin._V3_GATEWAY_APIS
 
-    def __init__(self, get_host_creds):
+    def __init__(self, get_host_creds: Callable[[], MlflowHostCreds]) -> None:
         super().__init__()
         self.get_host_creds = get_host_creds
 
@@ -247,14 +264,17 @@ class RestStore(
 
         return None
 
+    # ``api`` is a generated proto request-message class and the parsed response message is
+    # returned; protobuf ships no stubs in the lint environment, so both are typed `Any`
+    # (same idiom as mlflow/store/model_registry/rest_store.py).
     def _call_endpoint(
         self,
-        api,
-        json_body=None,
-        endpoint=None,
-        retry_timeout_seconds=None,
-        response_proto=None,
-    ):
+        api: Any,
+        json_body: str | None = None,
+        endpoint: str | None = None,
+        retry_timeout_seconds: int | None = None,
+        response_proto: Any = None,
+    ) -> Any:
         # Route v3 APIs to v3 endpoints, all others to v2 endpoints
         method_to_info = self._V3_METHOD_TO_INFO if api in self._V3_APIS else self._METHOD_TO_INFO
         self._validate_workspace_support_if_specified()
@@ -277,12 +297,12 @@ class RestStore(
 
     def search_experiments(
         self,
-        view_type=ViewType.ACTIVE_ONLY,
-        max_results=None,
-        filter_string=None,
-        order_by=None,
-        page_token=None,
-    ):
+        view_type: int = ViewType.ACTIVE_ONLY,
+        max_results: int | None = None,
+        filter_string: str | None = None,
+        order_by: list[str] | None = None,
+        page_token: str | None = None,
+    ) -> PagedList[Experiment]:
         req_body = message_to_json(
             SearchExperiments(
                 view_type=view_type,
@@ -299,7 +319,12 @@ class RestStore(
         )
         return PagedList(experiments, token)
 
-    def create_experiment(self, name, artifact_location=None, tags=None):
+    def create_experiment(
+        self,
+        name: str,
+        artifact_location: str | None = None,
+        tags: list[ExperimentTag] | None = None,
+    ) -> str:
         """
         Create a new experiment.
         If an experiment with the given name already exists, throws exception.
@@ -318,9 +343,10 @@ class RestStore(
             CreateExperiment(name=name, artifact_location=artifact_location, tags=tag_protos)
         )
         response_proto = self._call_endpoint(CreateExperiment, req_body)
-        return response_proto.experiment_id
+        experiment_id: str = response_proto.experiment_id
+        return experiment_id
 
-    def get_experiment(self, experiment_id):
+    def get_experiment(self, experiment_id: str) -> Experiment:
         """
         Fetch the experiment from the backend store.
 
@@ -335,21 +361,21 @@ class RestStore(
         response_proto = self._call_endpoint(GetExperiment, req_body)
         return Experiment.from_proto(response_proto.experiment)
 
-    def delete_experiment(self, experiment_id):
+    def delete_experiment(self, experiment_id: str) -> None:
         req_body = message_to_json(DeleteExperiment(experiment_id=str(experiment_id)))
         self._call_endpoint(DeleteExperiment, req_body)
 
-    def restore_experiment(self, experiment_id):
+    def restore_experiment(self, experiment_id: str) -> None:
         req_body = message_to_json(RestoreExperiment(experiment_id=str(experiment_id)))
         self._call_endpoint(RestoreExperiment, req_body)
 
-    def rename_experiment(self, experiment_id, new_name):
+    def rename_experiment(self, experiment_id: str, new_name: str) -> None:
         req_body = message_to_json(
             UpdateExperiment(experiment_id=str(experiment_id), new_name=new_name)
         )
         self._call_endpoint(UpdateExperiment, req_body)
 
-    def get_run(self, run_id):
+    def get_run(self, run_id: str) -> Run:
         """
         Fetch the run from backend store
 
@@ -363,7 +389,13 @@ class RestStore(
         response_proto = self._call_endpoint(GetRun, req_body)
         return Run.from_proto(response_proto.run)
 
-    def update_run_info(self, run_id, run_status, end_time, run_name):
+    def update_run_info(
+        self,
+        run_id: str,
+        run_status: int | None,
+        end_time: int | None,
+        run_name: str | None,
+    ) -> RunInfo:
         """Updates the metadata of the specified run."""
         req_body = message_to_json(
             UpdateRun(
@@ -377,7 +409,14 @@ class RestStore(
         response_proto = self._call_endpoint(UpdateRun, req_body)
         return RunInfo.from_proto(response_proto.run_info)
 
-    def create_run(self, experiment_id, user_id, start_time, tags, run_name):
+    def create_run(
+        self,
+        experiment_id: str,
+        user_id: str,
+        start_time: int,
+        tags: list[RunTag] | None,
+        run_name: str | None,
+    ) -> Run:
         """
         Create a run under the specified experiment ID, setting the run's status to "RUNNING"
         and the start time to the current time.
@@ -498,7 +537,8 @@ class RestStore(
                 )
             )
             res = self._call_endpoint(DeleteTraces, req_body)
-            return res.traces_deleted
+            traces_deleted: int = res.traces_deleted
+            return traces_deleted
 
     def get_trace_info(self, trace_id: str) -> TraceInfo:
         """
@@ -584,7 +624,7 @@ class RestStore(
         page_token: str | None = None,
         model_id: str | None = None,
         locations: list[str] | None = None,
-    ):
+    ) -> tuple[list[TraceInfo], str | None]:
         locations = _resolve_experiment_ids_and_locations(experiment_ids, locations)
 
         if model_id is not None:
@@ -686,7 +726,7 @@ class RestStore(
         response_proto = self._call_endpoint(CalculateTraceFilterCorrelation, req_body, v3_endpoint)
         return TraceFilterCorrelationResult.from_proto(response_proto)
 
-    def set_trace_tag(self, trace_id: str, key: str, value: str):
+    def set_trace_tag(self, trace_id: str, key: str, value: str) -> None:
         """
         Set a tag on the trace with the given trace_id.
 
@@ -699,7 +739,7 @@ class RestStore(
         req_body = message_to_json(SetTraceTag(key=key, value=value))
         self._call_endpoint(SetTraceTag, req_body, endpoint=get_trace_tag_endpoint(trace_id))
 
-    def delete_trace_tag(self, trace_id: str, key: str):
+    def delete_trace_tag(self, trace_id: str, key: str) -> None:
         """
         Delete a tag on the trace with the given trace_id.
 
@@ -791,8 +831,8 @@ class RestStore(
         trace_id: str,
         assessment_id: str,
         name: str | None = None,
-        expectation: Expectation | None = None,
-        feedback: Feedback | None = None,
+        expectation: ExpectationValue | None = None,
+        feedback: FeedbackValue | None = None,
         rationale: str | None = None,
         metadata: dict[str, str] | None = None,
     ) -> Assessment:
@@ -847,7 +887,7 @@ class RestStore(
         )
         return Assessment.from_proto(response_proto.assessment)
 
-    def delete_assessment(self, trace_id: str, assessment_id: str):
+    def delete_assessment(self, trace_id: str, assessment_id: str) -> None:
         """
         Delete an assessment associated with a trace.
 
@@ -1000,14 +1040,14 @@ class RestStore(
 
     def create_label_schema(
         self,
-        experiment_id,
+        experiment_id: str,
         *,
-        name,
-        type,
-        input,
-        instruction=None,
-        enable_comment=False,
-    ):
+        name: str,
+        type: Literal["feedback", "expectation"],
+        input: "InputType",
+        instruction: str | None = None,
+        enable_comment: bool = False,
+    ) -> "LabelSchema":
         # Lazy import — mlflow.genai.__init__ transitively imports the
         # artifact-repo registry, which imports RestStore, so a top-level
         # import here creates a circular load.
@@ -1034,7 +1074,7 @@ class RestStore(
         )
         return LabelSchema.from_proto(response_proto.label_schema)
 
-    def get_label_schema(self, schema_id):
+    def get_label_schema(self, schema_id: str) -> "LabelSchema":
         from mlflow.genai.label_schemas.label_schemas import LabelSchema
 
         req = GetLabelSchema(schema_id=schema_id)
@@ -1045,7 +1085,7 @@ class RestStore(
         )
         return LabelSchema.from_proto(response_proto.label_schema)
 
-    def get_label_schema_by_name(self, experiment_id, name):
+    def get_label_schema_by_name(self, experiment_id: str, name: str) -> "LabelSchema":
         from mlflow.genai.label_schemas.label_schemas import LabelSchema
 
         req = GetLabelSchemaByName(experiment_id=str(experiment_id), name=name)
@@ -1056,7 +1096,12 @@ class RestStore(
         )
         return LabelSchema.from_proto(response_proto.label_schema)
 
-    def list_label_schemas(self, experiment_id, max_results=100, page_token=None):
+    def list_label_schemas(
+        self,
+        experiment_id: str,
+        max_results: int = 100,
+        page_token: str | None = None,
+    ) -> PagedList["LabelSchema"]:
         from mlflow.genai.label_schemas.label_schemas import LabelSchema
 
         req = ListLabelSchemas(experiment_id=str(experiment_id), max_results=max_results)
@@ -1072,13 +1117,13 @@ class RestStore(
 
     def update_label_schema(
         self,
-        schema_id,
+        schema_id: str,
         *,
-        name=None,
-        instruction=None,
-        enable_comment=None,
-        input=None,
-    ):
+        name: str | None = None,
+        instruction: str | None = None,
+        enable_comment: bool | None = None,
+        input: "InputType | None" = None,
+    ) -> "LabelSchema":
         from mlflow.genai.label_schemas.label_schemas import LabelSchema, _input_to_proto
 
         req = UpdateLabelSchema(schema_id=schema_id)
@@ -1097,7 +1142,7 @@ class RestStore(
         )
         return LabelSchema.from_proto(response_proto.label_schema)
 
-    def delete_label_schema(self, schema_id):
+    def delete_label_schema(self, schema_id: str) -> None:
         req = DeleteLabelSchema(schema_id=schema_id)
         self._call_endpoint(
             DeleteLabelSchema,
@@ -1112,14 +1157,14 @@ class RestStore(
 
     def create_review_queue(
         self,
-        experiment_id,
+        experiment_id: str,
         *,
-        name,
-        queue_type,
-        created_by=None,
-        users=None,
-        schema_ids=None,
-    ):
+        name: str,
+        queue_type: Literal["user", "custom"],
+        created_by: str | None = None,
+        users: list[str] | None = None,
+        schema_ids: list[str] | None = None,
+    ) -> "ReviewQueue":
         from mlflow.genai.review_queues import ReviewQueue
         from mlflow.genai.review_queues.validation import coerce_queue_type
 
@@ -1139,7 +1184,7 @@ class RestStore(
         )
         return ReviewQueue.from_proto(response_proto.review_queue)
 
-    def get_or_create_user_queue(self, experiment_id, *, user):
+    def get_or_create_user_queue(self, experiment_id: str, *, user: str) -> "ReviewQueue":
         from mlflow.genai.review_queues import ReviewQueue
 
         req = GetOrCreateUserQueue(experiment_id=str(experiment_id), user=user)
@@ -1150,7 +1195,7 @@ class RestStore(
         )
         return ReviewQueue.from_proto(response_proto.review_queue)
 
-    def get_review_queue(self, queue_id):
+    def get_review_queue(self, queue_id: str) -> "ReviewQueue":
         from mlflow.genai.review_queues import ReviewQueue
 
         req = GetReviewQueue(queue_id=queue_id)
@@ -1161,7 +1206,7 @@ class RestStore(
         )
         return ReviewQueue.from_proto(response_proto.review_queue)
 
-    def get_review_queue_by_name(self, experiment_id, *, name):
+    def get_review_queue_by_name(self, experiment_id: str, *, name: str) -> "ReviewQueue":
         from mlflow.genai.review_queues import ReviewQueue
 
         req = GetReviewQueueByName(experiment_id=str(experiment_id), name=name)
@@ -1173,8 +1218,14 @@ class RestStore(
         return ReviewQueue.from_proto(response_proto.review_queue)
 
     def list_review_queues(
-        self, experiment_id, *, user=None, item_id=None, max_results=None, page_token=None
-    ):
+        self,
+        experiment_id: str,
+        *,
+        user: str | None = None,
+        item_id: str | None = None,
+        max_results: int | None = None,
+        page_token: str | None = None,
+    ) -> PagedList["ReviewQueue"]:
         from mlflow.genai.review_queues import ReviewQueue
 
         req = ListReviewQueues(experiment_id=str(experiment_id))
@@ -1195,8 +1246,14 @@ class RestStore(
         return PagedList(queues, response_proto.next_page_token or None)
 
     def update_review_queue(
-        self, queue_id, *, name=None, new_owner=None, users=None, schema_ids=None
-    ):
+        self,
+        queue_id: str,
+        *,
+        name: str | None = None,
+        new_owner: str | None = None,
+        users: list[str] | None = None,
+        schema_ids: list[str] | None = None,
+    ) -> "ReviewQueue":
         from mlflow.genai.review_queues import ReviewQueue
 
         req = UpdateReviewQueue(queue_id=queue_id)
@@ -1217,7 +1274,7 @@ class RestStore(
         )
         return ReviewQueue.from_proto(response_proto.review_queue)
 
-    def delete_review_queue(self, queue_id):
+    def delete_review_queue(self, queue_id: str) -> None:
         req = DeleteReviewQueue(queue_id=queue_id)
         self._call_endpoint(
             DeleteReviewQueue,
@@ -1225,7 +1282,13 @@ class RestStore(
             endpoint=f"{_V3_REVIEW_QUEUES_REST_API_PATH_PREFIX}/delete",
         )
 
-    def add_items_to_review_queue(self, queue_id, *, item_ids, item_type="trace"):
+    def add_items_to_review_queue(
+        self,
+        queue_id: str,
+        *,
+        item_ids: list[str],
+        item_type: Literal["trace"] = "trace",
+    ) -> list["ReviewQueueItem"]:
         from mlflow.genai.review_queues import ReviewQueueItem
         from mlflow.genai.review_queues.validation import coerce_item_type
 
@@ -1241,7 +1304,7 @@ class RestStore(
         )
         return [ReviewQueueItem.from_proto(i) for i in response_proto.items]
 
-    def remove_items_from_review_queue(self, queue_id, *, item_ids):
+    def remove_items_from_review_queue(self, queue_id: str, *, item_ids: list[str]) -> None:
         req = RemoveItemsFromReviewQueue(queue_id=queue_id, item_ids=list(item_ids))
         self._call_endpoint(
             RemoveItemsFromReviewQueue,
@@ -1249,7 +1312,14 @@ class RestStore(
             endpoint=f"{_V3_REVIEW_QUEUES_REST_API_PATH_PREFIX}/items/remove",
         )
 
-    def list_review_queue_items(self, queue_id, *, status=None, max_results=None, page_token=None):
+    def list_review_queue_items(
+        self,
+        queue_id: str,
+        *,
+        status: Literal["pending", "complete", "declined"] | None = None,
+        max_results: int | None = None,
+        page_token: str | None = None,
+    ) -> PagedList["ReviewQueueItem"]:
         from mlflow.genai.review_queues import ReviewQueueItem
         from mlflow.genai.review_queues.validation import coerce_status
 
@@ -1268,7 +1338,14 @@ class RestStore(
         items = [ReviewQueueItem.from_proto(i) for i in response_proto.items]
         return PagedList(items, response_proto.next_page_token or None)
 
-    def set_review_queue_item_status(self, queue_id, *, item_id, status, completed_by=None):
+    def set_review_queue_item_status(
+        self,
+        queue_id: str,
+        *,
+        item_id: str,
+        status: Literal["pending", "complete", "declined"],
+        completed_by: str | None = None,
+    ) -> "ReviewQueueItem":
         from mlflow.genai.review_queues import ReviewQueueItem
         from mlflow.genai.review_queues.validation import coerce_status
 
@@ -1286,7 +1363,7 @@ class RestStore(
         )
         return ReviewQueueItem.from_proto(response_proto.item)
 
-    def log_metric(self, run_id: str, metric: Metric):
+    def log_metric(self, run_id: str, metric: Metric) -> None:
         """
         Log a metric for the specified run
 
@@ -1309,7 +1386,7 @@ class RestStore(
         )
         self._call_endpoint(LogMetric, req_body)
 
-    def log_param(self, run_id, param):
+    def log_param(self, run_id: str, param: Param) -> None:
         """
         Log a param for the specified run
 
@@ -1322,7 +1399,7 @@ class RestStore(
         )
         self._call_endpoint(LogParam, req_body)
 
-    def set_experiment_tag(self, experiment_id, tag):
+    def set_experiment_tag(self, experiment_id: str, tag: ExperimentTag) -> None:
         """
         Set a tag for the specified experiment
 
@@ -1335,7 +1412,7 @@ class RestStore(
         )
         self._call_endpoint(SetExperimentTag, req_body)
 
-    def delete_experiment_tag(self, experiment_id, key):
+    def delete_experiment_tag(self, experiment_id: str, key: str) -> None:
         """
         Delete a tag from the specified experiment
 
@@ -1346,7 +1423,7 @@ class RestStore(
         req_body = message_to_json(DeleteExperimentTag(experiment_id=experiment_id, key=key))
         self._call_endpoint(DeleteExperimentTag, req_body)
 
-    def set_tag(self, run_id, tag):
+    def set_tag(self, run_id: str, tag: RunTag) -> None:
         """
         Set a tag for the specified run
 
@@ -1359,7 +1436,7 @@ class RestStore(
         )
         self._call_endpoint(SetTag, req_body)
 
-    def delete_tag(self, run_id, key):
+    def delete_tag(self, run_id: str, key: str) -> None:
         """
         Delete a tag from a run. This is irreversible.
 
@@ -1370,7 +1447,13 @@ class RestStore(
         req_body = message_to_json(DeleteTag(run_id=run_id, key=key))
         self._call_endpoint(DeleteTag, req_body)
 
-    def get_metric_history(self, run_id, metric_key, max_results=None, page_token=None):
+    def get_metric_history(
+        self,
+        run_id: str,
+        metric_key: str,
+        max_results: int | None = None,
+        page_token: str | None = None,
+    ) -> list[Metric]:
         """
         Return all logged values for a given metric.
 
@@ -1402,8 +1485,14 @@ class RestStore(
         return PagedList(metric_history, response_proto.next_page_token or None)
 
     def _search_runs(
-        self, experiment_ids, filter_string, run_view_type, max_results, order_by, page_token
-    ):
+        self,
+        experiment_ids: list[str],
+        filter_string: str,
+        run_view_type: int,
+        max_results: int,
+        order_by: list[str] | None,
+        page_token: str | None,
+    ) -> tuple[list[Run], str | None]:
         experiment_ids = [str(experiment_id) for experiment_id in experiment_ids]
         sr = SearchRuns(
             experiment_ids=experiment_ids,
@@ -1422,15 +1511,15 @@ class RestStore(
             next_page_token = response_proto.next_page_token
         return runs, next_page_token
 
-    def delete_run(self, run_id):
+    def delete_run(self, run_id: str) -> None:
         req_body = message_to_json(DeleteRun(run_id=run_id))
         self._call_endpoint(DeleteRun, req_body)
 
-    def restore_run(self, run_id):
+    def restore_run(self, run_id: str) -> None:
         req_body = message_to_json(RestoreRun(run_id=run_id))
         self._call_endpoint(RestoreRun, req_body)
 
-    def get_experiment_by_name(self, experiment_name):
+    def get_experiment_by_name(self, experiment_name: str) -> Experiment:
         try:
             req_body = message_to_json(GetExperimentByName(experiment_name=experiment_name))
             response_proto = self._call_endpoint(GetExperimentByName, req_body)
@@ -1443,7 +1532,13 @@ class RestStore(
             else:
                 raise
 
-    def log_batch(self, run_id, metrics, params, tags):
+    def log_batch(
+        self,
+        run_id: str,
+        metrics: list[Metric],
+        params: list[Param],
+        tags: list[RunTag],
+    ) -> None:
         metric_protos = [metric.to_proto() for metric in metrics]
         param_protos = [param.to_proto() for param in params]
         tag_protos = [tag.to_proto() for tag in tags]
@@ -1452,7 +1547,7 @@ class RestStore(
         )
         self._call_endpoint(LogBatch, req_body)
 
-    def record_logged_model(self, run_id, mlflow_model):
+    def record_logged_model(self, run_id: str, mlflow_model: "Model") -> None:
         req_body = message_to_json(
             LogModel(run_id=run_id, model_json=json.dumps(mlflow_model.get_tags_dict()))
         )
@@ -1554,7 +1649,7 @@ class RestStore(
         response_proto = self._call_endpoint(GetLoggedModel, endpoint=endpoint)
         return LoggedModel.from_proto(response_proto.model)
 
-    def delete_logged_model(self, model_id) -> None:
+    def delete_logged_model(self, model_id: str) -> None:
         request = DeleteLoggedModel(model_id=model_id)
         endpoint = get_logged_model_endpoint(model_id)
         self._call_endpoint(
@@ -1683,7 +1778,7 @@ class RestStore(
         run_id: str,
         datasets: list[DatasetInput] | None = None,
         models: list[LoggedModelInput] | None = None,
-    ):
+    ) -> None:
         """
         Log inputs, such as datasets, to the specified run.
 
@@ -1707,7 +1802,7 @@ class RestStore(
         )
         self._call_endpoint(LogInputs, req_body)
 
-    def log_outputs(self, run_id: str, models: list[LoggedModelOutput]):
+    def log_outputs(self, run_id: str, models: list[LoggedModelOutput]) -> None:
         """
         Log outputs, such as models, to the specified run.
 
@@ -1935,7 +2030,11 @@ class RestStore(
                 error_code=INTERNAL_ERROR,
             ) from e
 
-    def _parse_online_scoring_config_from_response(self, response, endpoint: str):
+    def _parse_online_scoring_config_from_response(
+        self,
+        response: Any,
+        endpoint: str,
+    ) -> "OnlineScoringConfig":
         """
         Parse an OnlineScoringConfig from an HTTP response.
 
@@ -1972,7 +2071,7 @@ class RestStore(
     ############################################################################################
     def deprecated_start_trace_v2(
         self,
-        experiment_id: str,
+        experiment_id: str | None,
         timestamp_ms: int,
         request_metadata: dict[str, str],
         tags: dict[str, str],
@@ -1983,7 +2082,8 @@ class RestStore(
         Start an initial TraceInfo object in the backend store.
 
         Args:
-            experiment_id: String id of the experiment for this run.
+            experiment_id: String id of the experiment for this run. May be None for traces
+                that are not associated with an experiment.
             timestamp_ms: Start time of the trace, in milliseconds since the UNIX epoch.
             request_metadata: Metadata of the trace.
             tags: Tags of the trace.
@@ -2089,7 +2189,9 @@ class RestStore(
         Returns:
             The created EvaluationDataset.
         """
-        from mlflow.entities import EvaluationDataset
+        # NB: Direct module import — `mlflow.entities` exports EvaluationDataset lazily via
+        # module __getattr__, which mypy cannot resolve as a type.
+        from mlflow.entities.evaluation_dataset import EvaluationDataset
 
         req = CreateDataset(
             name=name,
@@ -2117,7 +2219,9 @@ class RestStore(
         Returns:
             The EvaluationDataset object.
         """
-        from mlflow.entities import EvaluationDataset
+        # NB: Direct module import — `mlflow.entities` exports EvaluationDataset lazily via
+        # module __getattr__, which mypy cannot resolve as a type.
+        from mlflow.entities.evaluation_dataset import EvaluationDataset
 
         # GetDataset uses path parameter, not request body
         response_proto = self._call_endpoint(
@@ -2222,7 +2326,8 @@ class RestStore(
             req_body,
             endpoint=f"/api/3.0/mlflow/datasets/{dataset_id}/records",
         )
-        return response_proto.deleted_count
+        deleted_count: int = response_proto.deleted_count
+        return deleted_count
 
     @databricks_api_disabled(_DATABRICKS_DATASET_API_NAME, _DATABRICKS_DATASET_ALTERNATIVE)
     def set_dataset_tags(self, dataset_id: str, tags: dict[str, Any]) -> None:
@@ -2276,7 +2381,7 @@ class RestStore(
 
     def _load_dataset_records(
         self, dataset_id: str, max_results: int | None = None, page_token: str | None = None
-    ) -> tuple["list[DatasetRecord]", str | None]:
+    ) -> tuple[list["DatasetRecord"], str | None]:
         """
         Load dataset records with pagination support.
 
@@ -2293,7 +2398,7 @@ class RestStore(
 
         if max_results is None:
             # No pagination requested - fetch all records
-            all_records = []
+            all_records: list[DatasetRecord] = []
             current_page_token = page_token
 
             while True:
@@ -2333,7 +2438,7 @@ class RestStore(
                 endpoint=f"/api/3.0/mlflow/datasets/{dataset_id}/records",
             )
 
-            records = []
+            records: list[DatasetRecord] = []
             if response_proto.records:
                 records_dicts = json.loads(response_proto.records)
                 records.extend(
@@ -2432,7 +2537,9 @@ class RestStore(
         )
         return EvaluationDataset.from_proto(response.dataset)
 
-    def log_spans(self, location: str, spans: list[Span], tracking_uri=None) -> list[Span]:
+    def log_spans(
+        self, location: str, spans: list[Span], tracking_uri: str | None = None
+    ) -> list[Span]:
         """
         Log multiple span entities to the tracking store via the OTel API.
 

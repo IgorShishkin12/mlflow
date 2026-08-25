@@ -245,7 +245,12 @@ class WorkspaceAwareSqlAlchemyStore(WorkspaceAwareMixin, SqlAlchemyStore):
         return [row[0] for row in rows]
 
     def _filter_entity_ids(
-        self, session, entity_type: EntityAssociationType, entity_ids: list[str]
+        # NB: plain `str`, not EntityAssociationType — the constants class is not an
+        # Enum, so annotating it here conflicts with callers passing other strings.
+        self,
+        session,
+        entity_type: str,
+        entity_ids: list[str],
     ):
         workspace = self._get_active_workspace()
         if not entity_ids:

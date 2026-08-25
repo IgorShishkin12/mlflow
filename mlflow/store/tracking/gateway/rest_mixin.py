@@ -2,9 +2,10 @@
 
 from __future__ import annotations
 
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 from mlflow.entities import (
+    FallbackConfig,
     GatewayEndpoint,
     GatewayEndpointBinding,
     GatewayEndpointModelConfig,
@@ -45,7 +46,6 @@ from mlflow.protos.service_pb2 import (
     DeleteGatewayModelDefinition,
     DeleteGatewaySecret,
     DetachModelFromGatewayEndpoint,
-    FallbackConfig,
     GetGatewayBudgetPolicy,
     GetGatewayEndpoint,
     GetGatewayGuardrail,
@@ -81,6 +81,17 @@ class RestGatewayStoreMixin:
     The mixin expects the implementing class to provide:
     - _call_endpoint(api, json_body): Method to make REST API calls
     """
+
+    if TYPE_CHECKING:
+        # Signature mirrors RestStore._call_endpoint, which concrete stores provide.
+        def _call_endpoint(
+            self,
+            api: Any,
+            json_body: str | None = None,
+            endpoint: str | None = None,
+            retry_timeout_seconds: int | None = None,
+            response_proto: Any = None,
+        ) -> Any: ...
 
     # Set of v3 Gateway APIs (secrets, endpoints, model definitions, bindings)
     _V3_GATEWAY_APIS = {
@@ -590,7 +601,7 @@ class RestGatewayStoreMixin:
     def list_endpoint_bindings(
         self,
         endpoint_id: str | None = None,
-        resource_type: GatewayResourceType | None = None,
+        resource_type: str | None = None,
         resource_id: str | None = None,
     ) -> list[GatewayEndpointBinding]:
         """
@@ -734,7 +745,7 @@ class RestGatewayStoreMixin:
         action: GuardrailAction,
         action_endpoint_id: str | None = None,
     ) -> GatewayGuardrail:
-        kwargs = {
+        kwargs: dict[str, Any] = {
             "name": name,
             "scorer_id": scorer_id,
             "scorer_version": scorer_version,
@@ -775,7 +786,7 @@ class RestGatewayStoreMixin:
         execution_order: int | None = None,
         created_by: str | None = None,
     ) -> GatewayGuardrailConfig:
-        kwargs = {
+        kwargs: dict[str, Any] = {
             "endpoint_id": endpoint_id,
             "guardrail_id": guardrail_id,
         }
@@ -809,7 +820,7 @@ class RestGatewayStoreMixin:
         guardrail_id: str,
         execution_order: int | None = None,
     ) -> GatewayGuardrailConfig:
-        kwargs = {"endpoint_id": endpoint_id, "guardrail_id": guardrail_id}
+        kwargs: dict[str, Any] = {"endpoint_id": endpoint_id, "guardrail_id": guardrail_id}
         if execution_order is not None:
             kwargs["execution_order"] = execution_order
         req_body = message_to_json(UpdateEndpointGuardrailConfig(**kwargs))
