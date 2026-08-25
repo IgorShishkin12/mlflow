@@ -65,7 +65,7 @@ _MIME_TO_AUDIO_FORMAT: dict[str, str] = {
 
 def _normalize_content(
     content: str | list[dict[str, Any]],
-) -> str | list[dict[str, Any]]:
+) -> str | list[Any]:
     """
     Normalize multi-modal content blocks from LangChain's format to MLflow's expected format.
 
@@ -78,7 +78,9 @@ def _normalize_content(
         {"type": "input_audio", "input_audio": {"data": "...", "format": "wav"}}
 
     This function converts audio blocks to MLflow's format and returns the normalized content
-    so that it can be validated by :class:`~mlflow.types.chat.ChatMessage`.
+    so that it can be validated by :class:`~mlflow.types.chat.ChatMessage`. The returned list
+    items are unvalidated content-block dicts (plus ``model_dump()`` output); they are coerced
+    into typed content parts when passed to :class:`~mlflow.types.chat.ChatMessage`.
     """
     if isinstance(content, str):
         return content
@@ -196,8 +198,10 @@ def _chat_model_to_langchain_message(message: ChatMessage) -> BaseMessage:
         )
 
 
-def _get_tool_calls_from_ai_message(message: AIMessage) -> list[dict[str, Any]]:
-    # Extract tool calls from AIMessage
+def _get_tool_calls_from_ai_message(message: AIMessage) -> list[Any]:
+    # Extract tool calls from AIMessage.
+    # Returns unvalidated tool-call dicts; they are coerced into
+    # :class:`~mlflow.types.chat.ToolCall` instances by ChatMessage below.
     tool_calls = [
         {
             "type": "function",
@@ -227,11 +231,7 @@ def _get_tool_calls_from_ai_message(message: AIMessage) -> list[dict[str, Any]]:
 
     # Get tool calls from additional kwargs if present.
     return [
-        {
-            k: v
-            for k, v in tool_call.items()  # type: ignore[union-attr]
-            if k in {"id", "type", "function"}
-        }
+        {k: v for k, v in tool_call.items() if k in {"id", "type", "function"}}
         for tool_call in message.additional_kwargs.get("tool_calls", [])
     ]
 
@@ -464,7 +464,7 @@ def parse_token_usage(
         return None
 
     # Non-streaming mode: existing behavior (sum all generations)
-    aggregated = defaultdict(int)
+    aggregated: defaultdict[str, int] = defaultdict(int)
     for generation in lc_generations:
         if token_usage := _parse_token_usage_from_generation(generation):
             for key in token_usage:

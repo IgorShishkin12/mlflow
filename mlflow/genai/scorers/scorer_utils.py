@@ -6,7 +6,7 @@ import json
 import logging
 import re
 from textwrap import dedent
-from typing import TYPE_CHECKING, Any, Callable
+from typing import TYPE_CHECKING, Any, Callable, TypeGuard
 
 from mlflow.exceptions import INVALID_PARAMETER_VALUE, MlflowException
 
@@ -182,7 +182,7 @@ def recreate_function(source: str, signature: str, func_name: str) -> Callable[.
     return local_namespace[func_name]
 
 
-def is_gateway_model(model: str | None) -> bool:
+def is_gateway_model(model: str | None) -> TypeGuard[str]:
     if model is None:
         return False
     from mlflow.metrics.genai.model_utils import _parse_model_uri

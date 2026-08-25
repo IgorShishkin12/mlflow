@@ -104,10 +104,12 @@ class ModelRegistryClient:
         # TODO: Do we want to validate the name is legit here - non-empty without "/" and ":" ?
         #       Those are constraints applicable to any backend, given the model URI format.
         tags = tags or {}
-        tags = [RegisteredModelTag(key, str(value)) for key, value in tags.items()]  # type: ignore[assignment]
+        model_tags: list[RegisteredModelTag] = [
+            RegisteredModelTag(key, str(value)) for key, value in tags.items()
+        ]
         return self.store.create_registered_model(
             name,
-            tags,  # type: ignore[arg-type]
+            model_tags,
             description,
             deployment_job_id,
         )
@@ -281,14 +283,16 @@ class ModelRegistryClient:
 
         """
         tags = tags or {}
-        tags = [ModelVersionTag(key, str(value)) for key, value in tags.items()]  # type: ignore[assignment]
+        model_tags: list[ModelVersionTag] = [
+            ModelVersionTag(key, str(value)) for key, value in tags.items()
+        ]
         arg_names = _get_arg_names(self.store.create_model_version)
         if "local_model_path" in arg_names:
             mv: ModelVersion = self.store.create_model_version(
                 name,
                 source,
                 run_id,
-                tags,  # type: ignore[arg-type]
+                model_tags,
                 run_link,
                 description,
                 local_model_path=local_model_path,
@@ -302,7 +306,7 @@ class ModelRegistryClient:
                 name,
                 source,
                 run_id,
-                tags,  # type: ignore[arg-type]
+                model_tags,
                 run_link,
                 description,
                 model_id=model_id,

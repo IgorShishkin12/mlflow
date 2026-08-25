@@ -65,15 +65,16 @@ from mlflow.tracking._uc_upsell import show_existing_experiment_upsell, show_new
 from mlflow.utils import get_results_from_paginated_fn
 from mlflow.utils.async_logging.run_operations import RunOperations
 
-# `is_testing` below is only implicitly re-exported from autologging_utils.safety.
-from mlflow.utils.autologging_utils import (  # type: ignore[attr-defined]
+# `is_testing` is only implicitly re-exported by `mlflow.utils.autologging_utils`,
+# so it is imported from its defining module here.
+from mlflow.utils.autologging_utils import (
     AUTOLOGGING_CONF_KEY_IS_GLOBALLY_CONFIGURED,
     AUTOLOGGING_INTEGRATIONS,
     autologging_conf_lock,
     autologging_integration,
     autologging_is_disabled,
-    is_testing,
 )
+from mlflow.utils.autologging_utils.safety import is_testing
 from mlflow.utils.databricks_utils import (
     get_sgc_job_run_id,
     is_in_databricks_model_serving_environment,
@@ -680,7 +681,7 @@ def start_run(
 
         active_run_obj = client.create_run(
             # Logging requires a resolvable experiment; the backend rejects a missing ID.
-            experiment_id=exp_id_for_run,  # type: ignore[arg-type]
+            experiment_id=exp_id_for_run,
             tags=resolved_tags,
             run_name=run_name,
         )
@@ -690,7 +691,7 @@ def start_run(
         if sgc_job_run_id_tag_key:
             try:
                 client.set_experiment_tag(
-                    exp_id_for_run,  # type: ignore[arg-type]
+                    exp_id_for_run,
                     sgc_job_run_id_tag_key,
                     active_run_obj.info.run_id,
                 )
@@ -1067,7 +1068,7 @@ def set_experiment_tag(key: str, value: Any) -> None:
     """
     experiment_id = _get_experiment_id()
     # Logging requires a resolvable experiment; the backend rejects a missing ID.
-    MlflowClient().set_experiment_tag(experiment_id, key, value)  # type: ignore[arg-type]
+    MlflowClient().set_experiment_tag(experiment_id, key, value)
 
 
 def delete_experiment_tag(key: str) -> None:
@@ -1091,7 +1092,7 @@ def delete_experiment_tag(key: str) -> None:
     """
     experiment_id = _get_experiment_id()
     # Logging requires a resolvable experiment; the backend rejects a missing ID.
-    MlflowClient().delete_experiment_tag(experiment_id, key)  # type: ignore[arg-type]
+    MlflowClient().delete_experiment_tag(experiment_id, key)
 
 
 def set_tag(key: str, value: Any, synchronous: bool | None = None) -> RunOperations | None:
@@ -1160,8 +1161,8 @@ def delete_tag(key: str) -> None:
     MlflowClient().delete_tag(run_id, key)
 
 
-# With no model IDs to log against, the loop body never runs and None is returned implicitly.
-def log_metric(  # type: ignore[return]
+# With no model IDs to log against, the loop body never runs and None is returned.
+def log_metric(
     key: str,
     value: float,
     step: int | None = None,
@@ -1239,11 +1240,12 @@ def log_metric(  # type: ignore[return]
     timestamp = timestamp or get_current_time_millis()
     step = step or 0
     # `None` entries mean "no associated model"; `MlflowClient.log_metric` accepts them.
+    fallback_model_ids: list[str | None] = [None]
     model_ids: Sequence[str | None] = (
         [model_id]
         if model_id is not None
         # The fallback sentinel is checked against the helper's `list[str]`.
-        else (_get_model_ids_for_new_metric_if_exist(run, step) or [None])  # type: ignore[list-item]
+        else (_get_model_ids_for_new_metric_if_exist(run, step) or fallback_model_ids)
     )
     for model_id in model_ids:
         return MlflowClient().log_metric(
@@ -1257,6 +1259,7 @@ def log_metric(  # type: ignore[return]
             dataset_name=dataset.name if dataset is not None else None,
             dataset_digest=dataset.digest if dataset is not None else None,
         )
+    return None
 
 
 def _log_inputs_for_metrics_if_necessary(
@@ -1384,11 +1387,12 @@ def log_metrics(
     dataset_digest = dataset.digest if dataset is not None else None
     model_id = model_id or get_active_model_id()
     # `None` entries mean "no associated model"; `Metric` accepts them.
+    fallback_model_ids: list[str | None] = [None]
     model_ids: Sequence[str | None] = (
         [model_id]
         if model_id is not None
         # The fallback sentinel is checked against the helper's `list[str]`.
-        else (_get_model_ids_for_new_metric_if_exist(run, step) or [None])  # type: ignore[list-item]
+        else (_get_model_ids_for_new_metric_if_exist(run, step) or fallback_model_ids)
     )
     metrics_arr = [
         Metric(
@@ -1568,8 +1572,9 @@ def log_inputs(
                 models=None,
             )
     """
-    # Re-exported from mlflow.utils.uri, so not an explicit export of databricks_utils.
-    from mlflow.utils.databricks_utils import is_databricks_uri  # type: ignore[attr-defined]
+    # `is_databricks_uri` is defined in `mlflow.utils.uri`; `databricks_utils` only
+    # re-exports it implicitly.
+    from mlflow.utils.uri import is_databricks_uri
 
     run_id = _get_or_start_run().info.run_id
 
@@ -1593,8 +1598,8 @@ def log_inputs(
     MlflowClient().log_inputs(
         run_id=run_id,
         # None entries are permitted by this API and rejected by store-side validation.
-        datasets=dataset_inputs,  # type: ignore[arg-type]
-        models=models,  # type: ignore[arg-type]
+        datasets=dataset_inputs,
+        models=models,
     )
 
 
@@ -2157,7 +2162,7 @@ def load_table(
     """
     experiment_id = _get_experiment_id()
     # Logging requires a resolvable experiment; the backend rejects a missing ID.
-    return MlflowClient().load_table(experiment_id, artifact_file, run_ids, extra_columns)  # type: ignore[arg-type]
+    return MlflowClient().load_table(experiment_id, artifact_file, run_ids, extra_columns)
 
 
 def _record_logged_model(mlflow_model, run_id=None):
@@ -2653,7 +2658,7 @@ def _create_logged_model(
     resolved_tags = context_registry.resolve_tags(tags)
     return MlflowClient()._create_logged_model(
         # Logging requires a resolvable experiment; the backend rejects a missing ID.
-        experiment_id=experiment_id,  # type: ignore[arg-type]
+        experiment_id=experiment_id,
         name=name,
         source_run_id=source_run_id,
         tags=resolved_tags,
@@ -2694,7 +2699,7 @@ def log_model_params(params: dict[str, str], model_id: str | None = None) -> Non
     """
     model_id = model_id or get_active_model_id()
     # The client validates that a model ID is set and raises otherwise.
-    MlflowClient().log_model_params(model_id, params)  # type: ignore[arg-type]
+    MlflowClient().log_model_params(model_id, params)
 
 
 def import_checkpoints(
@@ -2774,7 +2779,7 @@ def import_checkpoints(
     ws = WorkspaceClient()
     top_level_paths = [
         # The Databricks SDK types `path` as Optional, but directory listings always populate it.
-        entry.path.rstrip("/")  # type: ignore[union-attr]
+        entry.path.rstrip("/")
         for entry in ws.files.list_directory_contents(checkpoint_path)
     ]
 
@@ -2894,8 +2899,8 @@ def get_logged_model(model_id: str) -> LoggedModel:
     return MlflowClient().get_logged_model(model_id)
 
 
-# Falling off the end returns None implicitly when no model has been logged this session.
-def last_logged_model() -> LoggedModel | None:  # type: ignore[return]
+# No model logged this session means the sentinel lookup misses and None is returned.
+def last_logged_model() -> LoggedModel | None:
     """
     Fetches the most recent logged model in the current session.
     If no model has been logged, None is returned.
@@ -2922,6 +2927,7 @@ def last_logged_model() -> LoggedModel | None:  # type: ignore[return]
     """
     if id := _last_logged_model_id.get():
         return get_logged_model(id)
+    return None
 
 
 @overload
@@ -3044,7 +3050,7 @@ def search_logged_models(
         assert [m.name for m in models] == ["model", "another_model"]
     """
     # Logging requires a resolvable experiment; the backend rejects a missing ID.
-    experiment_ids = experiment_ids or [_get_experiment_id()]  # type: ignore[list-item]
+    experiment_ids = experiment_ids or [_get_experiment_id()]
     client = MlflowClient()
     models = []
     page_token = None
@@ -3104,7 +3110,7 @@ def log_outputs(models: list[LoggedModelOutput] | None = None) -> None:
     """
     run_id = _get_or_start_run().info.run_id
     # The public API permits `models=None`; the client signature does not reflect that yet.
-    MlflowClient().log_outputs(run_id, models=models)  # type: ignore[arg-type]
+    MlflowClient().log_outputs(run_id, models=models)
 
 
 def delete_run(run_id: str) -> None:
@@ -3398,7 +3404,7 @@ def search_runs(
         ]
     elif no_ids_or_names:
         # Logging requires a resolvable experiment; the backend rejects a missing ID.
-        experiment_ids = [_get_experiment_id()]  # type: ignore[list-item]
+        experiment_ids = [_get_experiment_id()]
     elif not no_names:
         # `no_names` is False here, so `experiment_names` is a non-empty list.
         experiments = []
@@ -4073,8 +4079,8 @@ def get_active_model_id() -> str | None:
     return _get_active_model_context().model_id
 
 
-# Falls through to an implicit None when no thread has an active model ID.
-def _get_active_model_id_global() -> str | None:  # type: ignore[return]
+# Falls through to a None return when no thread has an active model ID.
+def _get_active_model_id_global() -> str | None:
     """
     Get the active model ID from the global context by checking all threads.
     This is useful when we need to get the active_model_id set by a different thread.
@@ -4095,9 +4101,10 @@ def _get_active_model_id_global() -> str | None:  # type: ignore[return]
                 f"found: {set(model_ids)}."
             )
             # Multiple conflicting IDs across threads intentionally resolve to no active model.
-            return  # type: ignore[return-value]
+            return None
         return model_ids[0]
     _logger.debug("No active model ID found in any thread.")
+    return None
 
 
 def clear_active_model() -> None:

@@ -125,9 +125,7 @@ def model_version_to_prompt_version(
     else:
         response_format = None
 
-    # NB: _ModelRegistryEntity declares `from_proto` abstract, but PromptVersion deliberately
-    # has no proto representation (prompts are built from model-version tags instead).
-    return PromptVersion(  # type: ignore[abstract]
+    return PromptVersion(
         name=model_version.name,
         version=int(model_version.version),
         template=template,

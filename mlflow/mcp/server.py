@@ -1,7 +1,8 @@
 import contextlib
 import io
 import os
-from typing import TYPE_CHECKING, Any, Callable
+from collections.abc import Mapping
+from typing import TYPE_CHECKING, Any, Callable, cast
 
 import click
 from click.types import BOOL, FLOAT, INT, STRING, UUID
@@ -57,30 +58,37 @@ def get_input_schema(params: list[click.Parameter]) -> dict[str, Any]:
     properties: dict[str, Any] = {}
     required: list[str] = []
     for p in params:
+        # click types Parameter.name as `str | None`, but the None case only arises for
+        # parameters constructed without declarations, which never happens for CLI
+        # commands exposed here.
+        name = cast(str, p.name)
         is_array_param = p.multiple or p.nargs == -1
-        item_schema = {"type": param_type_to_json_schema_type(p.type)}
+        item_schema: dict[str, Any] = {"type": param_type_to_json_schema_type(p.type)}
         if isinstance(p.type, click.Choice):
             item_schema["enum"] = [str(choice) for choice in p.type.choices]
 
-        schema = {"type": "array", "items": item_schema} if is_array_param else item_schema
+        schema: dict[str, Any] = (
+            {"type": "array", "items": item_schema} if is_array_param else item_schema
+        )
+        default: Any = p.default
         if (
-            p.default is not None
+            default is not None
             and (
                 # In click >= 8.3.0, the default value is set to `Sentinel.UNSET` when no default is
                 # provided. Skip setting the default in this case.
                 # See https://github.com/pallets/click/pull/3030 for more details.
-                not isinstance(p.default, str) and repr(p.default) != "Sentinel.UNSET"
+                not isinstance(default, str) and repr(default) != "Sentinel.UNSET"
             )
             and not (is_array_param and p.required)
         ):
-            schema["default"] = list(p.default) if is_array_param else p.default
+            schema["default"] = list(default) if is_array_param else default
         if isinstance(p, click.Option):
             schema["description"] = (p.help or "").strip()
         if p.required:
-            required.append(p.name)
+            required.append(name)
             if is_array_param:
                 schema["minItems"] = 1
-        properties[p.name] = schema
+        properties[name] = schema
 
     return {
         "type": "object",
@@ -101,29 +109,36 @@ def fn_wrapper(command: click.Command) -> Callable[..., str]:
         ):
             # Fill in defaults for missing optional arguments
             for param in command.params:
-                if param.name not in kwargs:
+                name = cast(str, param.name)
+                default: Any = param.default
+                if name not in kwargs:
                     if param.multiple or param.nargs == -1:
-                        if param.default in (None, click_unset):
-                            kwargs[param.name] = ()
+                        if default in (None, click_unset):
+                            kwargs[name] = ()
                         else:
-                            kwargs[param.name] = tuple(param.default)
-                    elif param.default is click_unset:
-                        kwargs[param.name] = None
+                            kwargs[name] = tuple(default)
+                    elif default is click_unset:
+                        kwargs[name] = None
                     else:
-                        kwargs[param.name] = param.default
+                        kwargs[name] = default
 
             # Convert array parameters to the types expected by each command's callback
             for param in command.params:
+                name = cast(str, param.name)
                 if (
-                    param.name in kwargs
+                    name in kwargs
                     and (param.multiple or param.nargs == -1)
-                    and isinstance(kwargs[param.name], list)
+                    and isinstance(kwargs[name], list)
                 ):
-                    kwargs[param.name] = tuple(
-                        param.type.convert(value, param, None) for value in kwargs[param.name]
+                    kwargs[name] = tuple(
+                        param.type.convert(value, param, None) for value in kwargs[name]
                     )
 
-            command.callback(**kwargs)  # type: ignore[misc]
+            # Every MCP-exposed command is created by @click.command from a Python
+            # function, so its callback is always set; click only admits None for
+            # commands constructed without one.
+            callback = cast("Callable[..., Any]", command.callback)
+            callback(**kwargs)
         return string_io.getvalue().strip()
 
     return wrapper
@@ -198,7 +213,7 @@ def _is_tool_enabled(category: str) -> bool:
     return category.lower() in enabled_tools
 
 
-def _collect_tools(commands: dict[str, click.Command]) -> list["FunctionTool"]:
+def _collect_tools(commands: Mapping[str, click.Command]) -> list["FunctionTool"]:
     """Collect MCP tools from commands, filtering out undecorated commands."""
     tools = []
     for cmd in commands.values():

@@ -26,6 +26,7 @@ from mlflow.utils.uri import (
 
 if TYPE_CHECKING:
     from mlflow.store.artifact.artifact_repo import ArtifactRepository
+    from mlflow.store.tracking.abstract_store import AbstractStore
 
 _logger = logging.getLogger(__name__)
 _tracking_uri: str | None = None
@@ -273,8 +274,11 @@ def _register(scheme, builder):
 _register_tracking_stores()
 
 
-def _get_store(store_uri=None, artifact_uri=None):
-    return _tracking_store_registry.get_store(store_uri, artifact_uri)
+def _get_store(store_uri: str | None = None, artifact_uri: str | None = None) -> "AbstractStore":
+    # The registry dispatches to plugin-provided stores; the tracking contract is
+    # AbstractStore (typed-local bridge over the registry's dynamic return).
+    store: "AbstractStore" = _tracking_store_registry.get_store(store_uri, artifact_uri)
+    return store
 
 
 def _get_tracking_scheme(store_uri=None) -> str:

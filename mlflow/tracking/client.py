@@ -39,7 +39,6 @@ from pydantic import BaseModel
 import mlflow
 from mlflow.entities import (
     DatasetInput,
-    EvaluationDataset,
     Experiment,
     FileInfo,
     Link,
@@ -174,6 +173,12 @@ if TYPE_CHECKING:
     import pandas
     import PIL
     import plotly
+
+    # `mlflow.entities` exposes `EvaluationDataset` lazily via module `__getattr__`, which
+    # type checkers cannot interpret as a class. Importing the defining module's class here
+    # (and referencing it through string annotations) keeps runtime loading lazy while giving
+    # the dataset APIs a real return type.
+    from mlflow.entities.evaluation_dataset import EvaluationDataset
 
 
 _logger = logging.getLogger(__name__)
@@ -312,7 +317,7 @@ class MlflowClient:
         """
         return self._workspace_store_uri
 
-    def _get_registry_client(self):
+    def _get_registry_client(self) -> ModelRegistryClient:
         """Attempts to create a ModelRegistryClient if one does not already exist.
 
         Raises:
@@ -791,9 +796,7 @@ class MlflowClient:
                 model_config=model_config,
             )
 
-            return registry_client.get_prompt_version(  # type: ignore[return-value]
-                name, str(prompt_version.version)
-            )
+            return registry_client.get_prompt_version(name, str(prompt_version.version))
 
         # OSS approach using RegisteredModel with special tags
         is_new_prompt = False
@@ -2063,7 +2066,7 @@ class MlflowClient:
             view_type=view_type,
             # The store applies its own default when None is passed; only the delegate's
             # annotation is narrower.
-            max_results=max_results,  # type: ignore[arg-type]
+            max_results=max_results,
             filter_string=filter_string,
             order_by=order_by,
             page_token=page_token,
@@ -2814,7 +2817,7 @@ class MlflowClient:
             mlflow.MlflowException: If any errors occur.
         """
         # Any Sequence is accepted at runtime; the delegate's annotation is narrower (list).
-        self._tracking_client.log_inputs(run_id, datasets, models)  # type: ignore[arg-type]
+        self._tracking_client.log_inputs(run_id, datasets, models)
 
     def log_outputs(self, run_id: str, models: list[LoggedModelOutput]) -> None:
         self._tracking_client.log_outputs(run_id, models)
@@ -4213,7 +4216,7 @@ class MlflowClient:
             name=name,
             # The public API allows None (stores persist it verbatim); only the delegate's
             # annotation is narrower.
-            description=description,  # type: ignore[arg-type]
+            description=description,
             deployment_job_id=deployment_job_id,
         )
 
@@ -6273,7 +6276,7 @@ class MlflowClient:
         registry_client = self._get_registry_client()
         # The store accepts numeric versions (coercing internally); only its annotation
         # is narrower than the `str | int` accepted here.
-        return registry_client.get_prompt_version(name, version)  # type: ignore[no-any-return]
+        return registry_client.get_prompt_version(name, version)
 
     @require_prompt_registry
     @translate_prompt_exception
@@ -6379,7 +6382,7 @@ class MlflowClient:
             prompt_version = client.get_prompt_version_by_alias("my_prompt", "production")
         """
         registry_client: ModelRegistryClient = self._get_registry_client()
-        return registry_client.get_prompt_version_by_alias(name, alias)  # type: ignore[return-value]
+        return registry_client.get_prompt_version_by_alias(name, alias)
 
     @require_prompt_registry
     @translate_prompt_exception
@@ -6475,7 +6478,7 @@ class MlflowClient:
         name: str,
         experiment_id: str | list[str] | None = None,
         tags: dict[str, Any] | None = None,
-    ) -> EvaluationDataset:
+    ) -> "EvaluationDataset":
         """
         Create a new dataset.
 
@@ -6501,14 +6504,17 @@ class MlflowClient:
                 tags={"environment": "production", "version": "1.0"},
             )
         """
-        return self._tracking_client.create_dataset(
+        # The delegate's annotation resolves through a lazy re-export, so bind its result
+        # to the real entity class here.
+        dataset: "EvaluationDataset" = self._tracking_client.create_dataset(
             name=name,
             experiment_id=experiment_id,
             tags=tags,
         )
+        return dataset
 
     @_disable_in_databricks()
-    def get_dataset(self, dataset_id: str) -> EvaluationDataset:
+    def get_dataset(self, dataset_id: str) -> "EvaluationDataset":
         """
         Get a dataset by ID.
 
@@ -6558,7 +6564,7 @@ class MlflowClient:
         max_results: int = SEARCH_EVALUATION_DATASETS_MAX_RESULTS,
         order_by: list[str] | None = None,
         page_token: str | None = None,
-    ) -> PagedList[EvaluationDataset]:
+    ) -> PagedList["EvaluationDataset"]:
         """
         Search for datasets.
 
@@ -6650,7 +6656,7 @@ class MlflowClient:
     @_disable_in_databricks()
     def add_dataset_to_experiments(
         self, dataset_id: str, experiment_ids: list[str]
-    ) -> EvaluationDataset:
+    ) -> "EvaluationDataset":
         """
         Add a dataset to additional experiments.
 
@@ -6680,7 +6686,7 @@ class MlflowClient:
     @_disable_in_databricks()
     def remove_dataset_from_experiments(
         self, dataset_id: str, experiment_ids: list[str]
-    ) -> EvaluationDataset:
+    ) -> "EvaluationDataset":
         """
         Remove a dataset from experiments.
 

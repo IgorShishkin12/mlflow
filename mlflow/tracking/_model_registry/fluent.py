@@ -197,9 +197,9 @@ def _register_model(
         # name artifact_path and source_run_id run_id
         else:
             run = client.get_run(run_id)
-            # NB: `parse_runs_uri` yields None for a bare `runs:/<run_id>` URI while the callee
-            # declares a model name string; existing runtime behavior is preserved as-is.
-            logged_models = _get_logged_models_from_run(run, artifact_path)  # type: ignore[arg-type]
+            # NB: `parse_runs_uri` yields None for a bare `runs:/<run_id>` URI; the helper
+            # accepts None so existing runtime behavior is preserved as-is.
+            logged_models = _get_logged_models_from_run(run, artifact_path)
             if not logged_models:
                 raise MlflowException(
                     f"Unable to find a logged_model with artifact_path {artifact_path} "
@@ -337,7 +337,7 @@ def _register_model(
     return create_version_response
 
 
-def _get_logged_models_from_run(source_run: Run, model_name: str) -> list[LoggedModel]:
+def _get_logged_models_from_run(source_run: Run, model_name: str | None) -> list[LoggedModel]:
     """Get all logged models from the source rnu that have the specified model name.
 
     Args:

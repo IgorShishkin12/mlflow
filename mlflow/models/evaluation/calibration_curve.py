@@ -97,13 +97,14 @@ def plot_calibration_curve(y_true, y_probs, pos_label, calibration_config, label
     if n_classes == 2:
         matches = np.where(np.sort(label_list) == pos_label)[0]
         pos_index = int(matches[0]) if len(matches) else 1
-        return CalibrationDisplay.from_predictions(
+        figure: Figure = CalibrationDisplay.from_predictions(
             y_true,
             y_prob=y_probs[:, pos_index],
             pos_label=pos_label,
-            name=calibration_config.get("calibration_classifier_name", None),  # type: ignore
-            n_bins=calibration_config.get("calibration_n_bins", 10),  # type: ignore
+            name=calibration_config.get("calibration_classifier_name", None),
+            n_bins=calibration_config.get("calibration_n_bins", 10),
         ).figure_
+        return figure
 
     # evaluating a multi-class classifier, create a calibration curve for each class
 

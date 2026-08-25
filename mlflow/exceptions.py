@@ -85,7 +85,9 @@ class MlflowException(Exception):
 
     def __init__(
         self,
-        message: str,
+        # NB: callers legitimately pass caught exception objects; the body coerces
+        # via str(message) before use.
+        message: str | BaseException,
         error_code: int = INTERNAL_ERROR,
         sqlstate: str | None = None,
         error_class: str | None = None,
@@ -106,7 +108,10 @@ class MlflowException(Exception):
                 of the MlflowException.
         """
         try:
-            self.error_code = ErrorCode.Name(error_code)
+            # NB: the protobuf stub types Name() as ValueType-only, but the runtime
+            # lookup accepts any int (callers pass raw ints from proto reads);
+            # stub strictness is reported in MAINTAINER_FINDINGS.md #7.
+            self.error_code = ErrorCode.Name(error_code)  # type: ignore[arg-type]
         except (ValueError, TypeError):
             self.error_code = ErrorCode.Name(INTERNAL_ERROR)
         message = str(message)
@@ -274,7 +279,9 @@ class MlflowTracingException(MlflowException):
     is used to distinguish tracing related errors and handle them properly.
     """
 
-    def __init__(self, message: str, error_code: int = INTERNAL_ERROR) -> None:
+    # NB: mirrors MlflowException.__init__ — callers pass caught exceptions; the
+    # base coerces via str(message).
+    def __init__(self, message: str | BaseException, error_code: int = INTERNAL_ERROR) -> None:
         super().__init__(message, error_code=error_code)
 
 

@@ -252,7 +252,7 @@ def execute_function(
     if is_scalar(function):
         value = None
         if data_array and len(data_array) > 0 and len(data_array[0]) > 0:
-            value = str(data_array[0][0])  # type: ignore
+            value = str(data_array[0][0])
         return FunctionExecutionResult(format="SCALAR", value=value, truncated=truncated)
     else:
         schema = manifest.schema
