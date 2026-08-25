@@ -261,16 +261,21 @@ class MlflowEventsAndWarningsBehaviorGlobally:
     _disable_warnings_count = 0
     _reroute_warnings_count = 0
 
-    def __init__(self, disable_event_logs, disable_warnings, reroute_warnings):
+    def __init__(
+        self,
+        disable_event_logs: bool,
+        disable_warnings: bool,
+        reroute_warnings: bool,
+    ) -> None:
         self._disable_event_logs = disable_event_logs
         self._disable_warnings = disable_warnings
         self._reroute_warnings = reroute_warnings
 
-    def __enter__(self):
+    def __enter__(self) -> "MlflowEventsAndWarningsBehaviorGlobally":
         self._enter_impl()
         return self
 
-    def __exit__(self, exc_type, exc_val, exc_tb):
+    def __exit__(self, exc_type, exc_val, exc_tb) -> None:
         self._exit_impl(exc_type, exc_val, exc_tb)
 
     async def __aenter__(self):

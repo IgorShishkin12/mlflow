@@ -163,7 +163,7 @@ def responses_agent_output_reducer(
     return ResponsesAgentResponse(output=output_items).model_dump(exclude_none=True)
 
 
-def create_text_delta(delta: str, item_id: str) -> dict[str, Any]:
+def create_text_delta(delta: str, item_id: str | None) -> dict[str, Any]:
     """Helper method to create a dictionary conforming to the text delta schema for
     streaming.
 
@@ -189,7 +189,7 @@ def create_annotation_added(
 
 
 def create_text_output_item(
-    text: str, id: str, annotations: list[dict[str, Any]] | None = None
+    text: str, id: str | None, annotations: list[dict[str, Any]] | None = None
 ) -> dict[str, Any]:
     """Helper method to create a dictionary conforming to the text output item schema.
 
@@ -213,7 +213,7 @@ def create_text_output_item(
     }
 
 
-def create_reasoning_item(id: str, reasoning_text: str) -> dict[str, Any]:
+def create_reasoning_item(id: str | None, reasoning_text: str) -> dict[str, Any]:
     """Helper method to create a dictionary conforming to the reasoning item schema.
 
     Read more at https://www.mlflow.org/docs/latest/llms/responses-agent-intro/#creating-agent-output.
@@ -230,7 +230,9 @@ def create_reasoning_item(id: str, reasoning_text: str) -> dict[str, Any]:
     }
 
 
-def create_function_call_item(id: str, call_id: str, name: str, arguments: str) -> dict[str, Any]:
+def create_function_call_item(
+    id: str | None, call_id: str, name: str, arguments: str
+) -> dict[str, Any]:
     """Helper method to create a dictionary conforming to the function call item schema.
 
     Read more at https://mlflow.org/docs/latest/genai/flavors/responses-agent-intro#creating-agent-output.
@@ -525,11 +527,11 @@ def _cc_stream_to_responses_stream(
                         if item.get("type") == "text" and item.get("text"):
                             llm_content += item["text"]
                             yield ResponsesAgentStreamEvent(
-                                **create_text_delta(item["text"], item_id=msg_id)  # type: ignore[arg-type]  # id may be None
+                                **create_text_delta(item["text"], item_id=msg_id)
                             )
             elif reasoning_content != "":
                 # reasoning content is done streaming
-                reasoning_item = create_reasoning_item(msg_id, reasoning_content)  # type: ignore[arg-type]  # id may be None
+                reasoning_item = create_reasoning_item(msg_id, reasoning_content)
                 if aggregator is not None:
                     aggregator.append(reasoning_item)
                 yield ResponsesAgentStreamEvent(  # type: ignore[call-arg]  # extra="allow"
@@ -540,14 +542,12 @@ def _cc_stream_to_responses_stream(
 
             if isinstance(content, str):
                 llm_content += content
-                yield ResponsesAgentStreamEvent(
-                    **create_text_delta(content, item_id=msg_id)  # type: ignore[arg-type]  # id may be None
-                )
+                yield ResponsesAgentStreamEvent(**create_text_delta(content, item_id=msg_id))
 
     # yield an `output_item.done` `output_text` event that aggregates the stream
     # this enables tracing and payload logging
     if llm_content:
-        text_output_item = create_text_output_item(llm_content, msg_id)  # type: ignore[arg-type]  # id may be None
+        text_output_item = create_text_output_item(llm_content, msg_id)
         if aggregator is not None:
             aggregator.append(text_output_item)
         yield ResponsesAgentStreamEvent(  # type: ignore[call-arg]  # extra="allow"
@@ -558,7 +558,7 @@ def _cc_stream_to_responses_stream(
     for idx in sorted(tool_calls.keys()):
         tool_call = tool_calls[idx]
         function_call_output_item = create_function_call_item(
-            msg_id,  # type: ignore[arg-type]  # id may be None
+            msg_id,
             tool_call["id"],
             tool_call["function"]["name"],
             tool_call["function"]["arguments"],

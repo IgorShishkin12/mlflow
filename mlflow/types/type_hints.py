@@ -2,7 +2,7 @@ import base64
 import logging
 from datetime import datetime
 from functools import lru_cache
-from types import UnionType
+from types import ModuleType, UnionType
 from typing import Any, NamedTuple, NoReturn, Optional, TypeVar, Union, cast, get_args, get_origin
 
 import pydantic
@@ -59,13 +59,15 @@ SUPPORTED_TYPE_HINT_MSG: str = (
 )
 
 
-def _try_import_numpy():
+def _try_import_numpy() -> ModuleType | None:
     try:
         import numpy
 
-        return numpy
+        # Bridge: mypy requires a ModuleType-typed local to return an imported module.
+        mod: ModuleType = numpy
+        return mod
     except ImportError:
-        return
+        return None
 
 
 @lru_cache(maxsize=1)

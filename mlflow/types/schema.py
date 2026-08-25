@@ -158,7 +158,7 @@ class DataType(Enum):
 
 class BaseType(ABC):
     @abstractmethod
-    def __eq__(self, other) -> bool:
+    def __eq__(self, other: object) -> bool:
         """
         Determine if two objects are equal.
         """
@@ -236,7 +236,7 @@ class Property(BaseType):
     def required(self, value: bool) -> None:
         self._required = value
 
-    def __eq__(self, other) -> bool:
+    def __eq__(self, other: object) -> bool:
         if isinstance(other, Property):
             return (
                 self.name == other.name
@@ -260,7 +260,7 @@ class Property(BaseType):
         return {self.name: d}
 
     @classmethod
-    def from_json_dict(cls, **kwargs: Any):
+    def from_json_dict(cls, **kwargs: Any) -> Property | SparkMLVector:
         """
         Deserialize from a json loaded dictionary.
         The dictionary is expected to contain only one key as `name`, and
@@ -364,7 +364,7 @@ class Object(BaseType):
         # Sort by name to make sure the order is stable
         self._properties = sorted(properties)
 
-    def _check_properties(self, properties):
+    def _check_properties(self, properties: list[Property]) -> None:
         if not isinstance(properties, list):
             raise MlflowException.invalid_parameter_value(
                 f"Expected properties to be a list, got type {type(properties).__name__}"
@@ -400,7 +400,7 @@ class Object(BaseType):
         self._check_properties(value)
         self._properties = sorted(value)
 
-    def __eq__(self, other) -> bool:
+    def __eq__(self, other: object) -> bool:
         if isinstance(other, Object):
             return self.properties == other.properties
         return False
@@ -437,7 +437,10 @@ class Object(BaseType):
         ):
             raise MlflowException("Expected properties to be a dictionary of Property JSON")
         return cls([
-            Property.from_json_dict(**{name: prop}) for name, prop in kwargs["properties"].items()
+            # NB: `Property.from_json_dict` can yield a bare `SparkMLVector` for the
+            # legacy `sparkml_vector` type; every supported property JSON is a Property.
+            cast(Property, Property.from_json_dict(**{name: prop}))
+            for name, prop in kwargs["properties"].items()
         ])
 
     def _merge(self, other: BaseType) -> Object:
@@ -536,7 +539,7 @@ class Array(BaseType):
         """The array data type."""
         return self._dtype
 
-    def __eq__(self, other) -> bool:
+    def __eq__(self, other: object) -> bool:
         if isinstance(other, Array):
             return self.dtype == other.dtype
         return False
@@ -625,7 +628,7 @@ class SparkMLVector(Array):
     def __repr__(self) -> str:
         return "SparkML vector"
 
-    def __eq__(self, other) -> bool:
+    def __eq__(self, other: object) -> bool:
         return isinstance(other, SparkMLVector)
 
     def _merge(self, arr: BaseType) -> SparkMLVector:
@@ -639,7 +642,7 @@ class Map(BaseType):
     Specification used to represent a json-convertible map with string type keys.
     """
 
-    def __init__(self, value_type: ALLOWED_DTYPES):
+    def __init__(self, value_type: ALLOWED_DTYPES) -> None:
         try:
             self._value_type = DataType[value_type] if isinstance(value_type, str) else value_type
         except KeyError:
@@ -659,7 +662,7 @@ class Map(BaseType):
     def __repr__(self) -> str:
         return f"Map(str -> {self._value_type})"
 
-    def __eq__(self, other) -> bool:
+    def __eq__(self, other: object) -> bool:
         if isinstance(other, Map):
             return self.value_type == other.value_type
         return False
@@ -673,7 +676,7 @@ class Map(BaseType):
         return {"type": MAP_TYPE, "values": values}
 
     @classmethod
-    def from_json_dict(cls, **kwargs: Any):
+    def from_json_dict(cls, **kwargs: Any) -> Map | SparkMLVector:
         """
         Deserialize from a json loaded dictionary.
         The dictionary is expected to contain `type` and
@@ -748,7 +751,7 @@ class AnyType(BaseType):
     def __repr__(self) -> str:
         return "Any"
 
-    def __eq__(self, other) -> bool:
+    def __eq__(self, other: object) -> bool:
         return isinstance(other, AnyType)
 
     def to_dict(self) -> dict[str, Any]:
@@ -778,7 +781,7 @@ class ColSpec:
         type: ALLOWED_DTYPES,
         name: str | None = None,
         required: bool = True,
-    ):
+    ) -> None:
         self._name = name
 
         self._required = required
@@ -820,7 +823,7 @@ class ColSpec:
         d["required"] = self.required
         return d
 
-    def __eq__(self, other) -> bool:
+    def __eq__(self, other: object) -> bool:
         if isinstance(other, ColSpec):
             names_eq = (self.name is None and other.name is None) or self.name == other.name
             return names_eq and self.type == other.type and self.required == other.required
@@ -833,7 +836,9 @@ class ColSpec:
         return f"{self.name!r}: {self.type!r} ({required})"
 
     @classmethod
-    def from_json_dict(cls, **kwargs: Any):
+    # NB: every runtime path returns (guarded above); totality is unprovable to mypy
+    # without restructuring the five-branch membership chain.
+    def from_json_dict(cls, **kwargs: Any) -> ColSpec:  # type: ignore[return]
         """
         Deserialize from a json loaded dictionary.
         The dictionary is expected to contain `type` and
@@ -866,7 +871,7 @@ class TensorInfo:
     Representation of the shape and type of a Tensor.
     """
 
-    def __init__(self, dtype: np.dtype[Any], shape: tuple[Any, ...] | list[Any]):
+    def __init__(self, dtype: np.dtype[Any], shape: tuple[Any, ...] | list[Any]) -> None:
         if not isinstance(dtype, np.dtype):
             raise TypeError(
                 f"Expected `dtype` to be instance of `{np.dtype}`, received `{dtype.__class__}`"
@@ -931,7 +936,7 @@ class TensorSpec:
         type: np.dtype[Any],
         shape: tuple[int, ...] | list[int],
         name: str | None = None,
-    ):
+    ) -> None:
         self._name = name
         self._tensorInfo = TensorInfo(type, shape)
 
@@ -981,7 +986,7 @@ class TensorSpec:
             tensor_info.dtype, tensor_info.shape, kwargs["name"] if "name" in kwargs else None
         )
 
-    def __eq__(self, other) -> bool:
+    def __eq__(self, other: object) -> bool:
         if isinstance(other, TensorSpec):
             names_eq = (self.name is None and other.name is None) or self.name == other.name
             return names_eq and self.type == other.type and self.shape == other.shape
@@ -1007,7 +1012,7 @@ class Schema:
     Combination of named and unnamed data inputs are not allowed.
     """
 
-    def __init__(self, inputs: list[ColSpec | TensorSpec]):
+    def __init__(self, inputs: list[ColSpec | TensorSpec]) -> None:
         if not isinstance(inputs, list):
             raise MlflowException.invalid_parameter_value(
                 f"Inputs of Schema must be a list, got type {type(inputs).__name__}"
@@ -1061,7 +1066,7 @@ class Schema:
         """Return true iff this schema is specified using TensorSpec"""
         # `self.inputs` is validated non-empty in __init__, so the `and` expression always
         # evaluates to its right operand (a bool), never to the list.
-        return self.inputs and isinstance(self.inputs[0], TensorSpec)  # type: ignore[return-value]
+        return cast(bool, self.inputs and isinstance(self.inputs[0], TensorSpec))
 
     def input_names(self) -> list[str | int]:
         """Get list of data names or range of indices if the schema has no names."""
@@ -1079,7 +1084,7 @@ class Schema:
         """Return true iff this schema declares names, false otherwise."""
         # `self.inputs` is validated non-empty in __init__, so the `and` expression always
         # evaluates to its right operand (a bool), never to the list.
-        return self.inputs and self.inputs[0].name is not None  # type: ignore[return-value]
+        return cast(bool, self.inputs and self.inputs[0].name is not None)
 
     def input_types(self) -> list[DataType | np.dtype[Any] | Array | Object | Map | AnyType]:
         """Get types for each column in the schema."""
@@ -1159,7 +1164,7 @@ class Schema:
     def from_json(cls, json_str: str) -> Schema:
         """Deserialize from a json string."""
 
-        def read_input(x: dict[str, Any]):
+        def read_input(x: dict[str, Any]) -> ColSpec | TensorSpec:
             return (
                 TensorSpec.from_json_dict(**x)
                 if x["type"] == "tensor"
@@ -1168,7 +1173,7 @@ class Schema:
 
         return cls([read_input(x) for x in json.loads(json_str)])
 
-    def __eq__(self, other) -> bool:
+    def __eq__(self, other: object) -> bool:
         if isinstance(other, Schema):
             return self.inputs == other.inputs
         else:
@@ -1189,7 +1194,7 @@ class ParamSpec:
         dtype: DataType | Object | str,
         default: Any,
         shape: tuple[int, ...] | None = None,
-    ):
+    ) -> None:
         self._name = str(name)
         self._shape = tuple(shape) if shape is not None else None
 
@@ -1232,7 +1237,7 @@ class ParamSpec:
         """
         from mlflow.models.utils import _enforce_object, _enforce_param_datatype
 
-        def _is_1d_array(value):
+        def _is_1d_array(value: Any) -> bool:
             return isinstance(value, (list, np.ndarray)) and np.array(value).ndim == 1
 
         if shape == (-1,) and not _is_1d_array(value):
@@ -1330,7 +1335,7 @@ class ParamSpec:
         # plus `properties` for Object dtypes), so the runtime dict conforms.
         return cast(ParamSpec.ParamSpecTypedDict, result)
 
-    def __eq__(self, other) -> bool:
+    def __eq__(self, other: object) -> bool:
         if isinstance(other, ParamSpec):
             return (
                 self.name == other.name
@@ -1360,12 +1365,10 @@ class ParamSpec:
                 "keys `name`, `type`(or `dtype`) and `default`. "
                 f"Received keys: {kwargs.keys()}"
             )
-        dtype = kwargs.get("type") or kwargs.get("dtype")
-        # The required-keys check above guarantees `type` (or the legacy `dtype`) is present
-        # with a usable value; an explicit null still fails below as it always has.
-        dtype = (
-            Object.from_json_dict(**kwargs) if dtype == OBJECT_TYPE else DataType[dtype]  # type: ignore[misc]
-        )
+        # The required-keys check above guarantees `type` (or the legacy `dtype`) is present;
+        # an explicit null still fails below as it always has.
+        raw_type = cast(str, kwargs.get("type") or kwargs.get("dtype"))
+        dtype = Object.from_json_dict(**kwargs) if raw_type == OBJECT_TYPE else DataType[raw_type]
         return cls(
             name=str(kwargs["name"]),
             dtype=dtype,
@@ -1380,7 +1383,7 @@ class ParamSchema:
     ParamSchema is represented as a list of :py:class:`ParamSpec`.
     """
 
-    def __init__(self, params: list[ParamSpec]):
+    def __init__(self, params: list[ParamSpec]) -> None:
         if not all(isinstance(x, ParamSpec) for x in params):
             raise MlflowException.invalid_parameter_value(
                 f"ParamSchema inputs only accept {ParamSchema.__class__}"
@@ -1428,7 +1431,7 @@ class ParamSchema:
         # ParamSpec.to_dict returns a TypedDict, which is a plain dict at runtime.
         return [cast(dict[str, Any], x.to_dict()) for x in self.params]
 
-    def __eq__(self, other) -> bool:
+    def __eq__(self, other: object) -> bool:
         if isinstance(other, ParamSchema):
             return self.params == other.params
         return False
@@ -1437,7 +1440,7 @@ class ParamSchema:
         return repr(self.params)
 
 
-def _map_field_type(field):
+def _map_field_type(field: Any) -> str | None:
     field_type_mapping = {
         bool: "boolean",
         int: "long",  # int is mapped to long to support 64-bit integers
@@ -1449,7 +1452,7 @@ def _map_field_type(field):
     return field_type_mapping.get(field)
 
 
-def _get_dataclass_annotations(cls) -> dict[str, Any]:
+def _get_dataclass_annotations(cls: type | Any) -> dict[str, Any]:
     """
     Given a dataclass or an instance of one, collect annotations from it and all its parent
     dataclasses.
@@ -1484,6 +1487,8 @@ def convert_dataclass_to_schema(dataclass: type) -> Schema:
     """
 
     inputs: list[ColSpec | TensorSpec] = []
+    # `dtype` holds either a nested Object spec or a mapped basic-type name.
+    dtype: Object | str | None
 
     for field_name, field_type in _get_dataclass_annotations(dataclass).items():
         # Determine the type and handle Optional and List correctly
@@ -1550,7 +1555,7 @@ def convert_dataclass_to_schema(dataclass: type) -> Schema:
     return Schema(inputs=inputs)
 
 
-def _convert_dataclass_to_nested_object(dataclass):
+def _convert_dataclass_to_nested_object(dataclass: Any) -> Object:
     """
     Convert a nested dataclass to an Object type used within a ColSpec.
     """
@@ -1560,7 +1565,7 @@ def _convert_dataclass_to_nested_object(dataclass):
     return Object(properties=properties)
 
 
-def _convert_field_to_property(field_name, field_type):
+def _convert_field_to_property(field_name: str, field_type: Any) -> Property:
     """
     Helper function to convert a single field to a Property object suitable for inclusion in an
     Object.
@@ -1575,9 +1580,11 @@ def _convert_field_to_property(field_name, field_type):
 
     if get_origin(effective_type) == list:
         list_type = get_args(effective_type)[0]
+        # An unmapped element type is not rejected here; Array validation raises the
+        # standard unsupported-type MlflowException, matching the top-level path.
         return Property(
             name=field_name,
-            dtype=Array(dtype=_map_field_type(list_type)),
+            dtype=Array(dtype=cast(str, _map_field_type(list_type))),
             required=not is_optional,
         )
     elif is_dataclass(effective_type):
@@ -1587,8 +1594,9 @@ def _convert_field_to_property(field_name, field_type):
             required=not is_optional,
         )
     else:
+        # Unmapped field types are likewise surfaced by Property validation.
         return Property(
             name=field_name,
-            dtype=_map_field_type(effective_type),
+            dtype=cast(str, _map_field_type(effective_type)),
             required=not is_optional,
         )

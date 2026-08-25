@@ -785,13 +785,13 @@ def _validate_tag_value(value: str | None) -> None:
         raise MlflowException("Tag value cannot be None", INVALID_PARAMETER_VALUE)
 
 
-def _validate_dataset_inputs(dataset_inputs: list[DatasetInput]):
+def _validate_dataset_inputs(dataset_inputs: list[DatasetInput]) -> None:
     for dataset_input in dataset_inputs:
         _validate_dataset(dataset_input.dataset)
         _validate_input_tags(dataset_input.tags)
 
 
-def _validate_dataset(dataset: Dataset):
+def _validate_dataset(dataset: Dataset) -> None:
     if dataset is None:
         raise MlflowException("Dataset cannot be None", INVALID_PARAMETER_VALUE)
     if dataset.name is None:
@@ -829,12 +829,12 @@ def _validate_dataset(dataset: Dataset):
         )
 
 
-def _validate_input_tags(input_tags: list[InputTag]):
+def _validate_input_tags(input_tags: list[InputTag]) -> None:
     for input_tag in input_tags:
         _validate_input_tag(input_tag)
 
 
-def _validate_input_tag(input_tag: InputTag):
+def _validate_input_tag(input_tag: InputTag) -> None:
     if input_tag is None:
         raise MlflowException("InputTag cannot be None", INVALID_PARAMETER_VALUE)
     if input_tag.key is None:
@@ -872,7 +872,7 @@ def _validate_trace_tag(key: str, value: str) -> tuple[str, str]:
     return key, value
 
 
-def _validate_experiment_artifact_location_length(artifact_location: str):
+def _validate_experiment_artifact_location_length(artifact_location: str) -> None:
     max_length = MLFLOW_ARTIFACT_LOCATION_MAX_LENGTH.get()
     if len(artifact_location) > max_length:
         raise MlflowException(
@@ -928,7 +928,7 @@ def _resolve_hostname_with_timeout(hostname: str, field_name: str) -> list[Any]:
 
     result: dict[str, Any] = {}
 
-    def _resolve():
+    def _resolve() -> None:
         try:
             result["addr_infos"] = socket.getaddrinfo(hostname, None)
         except Exception as e:
@@ -1035,7 +1035,10 @@ def _validate_mcp_icon_url(url: str) -> None:
         url,
         field_name="Icon URL",
         allowed_schemes=allowed_schemes,
-        allow_private_ips=allow_private_ips,
+        # NB: the env var is Optional (unset = not configured) while the callee's
+        # default models "not configured" as False; None-vs-False is not provably
+        # equivalent downstream, so this stays a suppression, not a widening.
+        allow_private_ips=allow_private_ips,  # type: ignore[arg-type]
     )
 
     allowed_domains = MLFLOW_ICON_URL_ALLOWED_DOMAINS.get()

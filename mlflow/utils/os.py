@@ -1,7 +1,7 @@
 import os
 
 
-def is_windows():
+def is_windows() -> bool:
     """
     Returns true if the local system/OS name is Windows.
 

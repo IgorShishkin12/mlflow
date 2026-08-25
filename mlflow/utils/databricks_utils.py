@@ -274,7 +274,7 @@ def get_databricks_runtime_version():
     return None
 
 
-def is_in_databricks_runtime():
+def is_in_databricks_runtime() -> bool:
     return get_databricks_runtime_version() is not None
 
 
@@ -972,7 +972,7 @@ def get_databricks_workspace_client_config(server_uri: str, scopes: list[str] | 
     from databricks.sdk import WorkspaceClient
 
     # Only pass scopes if provided to avoid breaking older databricks-sdk versions
-    kwargs = {}
+    kwargs: dict[str, Any] = {}
     if scopes is not None:
         check_databricks_sdk_supports_scopes()
         kwargs["scopes"] = scopes
@@ -1088,6 +1088,7 @@ def get_databricks_run_url(tracking_uri: str, run_id: str, artifact_path=None) -
             )
     except Exception:
         return None
+    return None
 
 
 def get_databricks_model_version_url(registry_uri: str, name: str, version: str) -> str | None:
@@ -1117,9 +1118,7 @@ def get_databricks_model_version_url(registry_uri: str, name: str, version: str)
             )
     except Exception:
         return None
-
-
-DatabricksWorkspaceInfoType = TypeVar("DatabricksWorkspaceInfo", bound="DatabricksWorkspaceInfo")
+    return None
 
 
 class DatabricksWorkspaceInfo:
@@ -1131,7 +1130,7 @@ class DatabricksWorkspaceInfo:
         self.workspace_id = workspace_id
 
     @classmethod
-    def from_environment(cls) -> DatabricksWorkspaceInfoType | None:
+    def from_environment(cls) -> "DatabricksWorkspaceInfo | None":
         if DatabricksWorkspaceInfo.WORKSPACE_HOST_ENV_VAR in os.environ:
             return DatabricksWorkspaceInfo(
                 host=os.environ[DatabricksWorkspaceInfo.WORKSPACE_HOST_ENV_VAR],
@@ -1204,17 +1203,21 @@ def get_sgc_job_run_id() -> str | None:
     """
     try:
         dbutils = _get_dbutils()
-        if job_run_id := dbutils.widgets.get("SERVERLESS_GPU_COMPUTE_ASSOCIATED_JOB_RUN_ID"):
-            _logger.debug(f"SGC job run ID from dbutils widget: {job_run_id}")
-            return job_run_id
+        widget_job_run_id: str | None = dbutils.widgets.get(
+            "SERVERLESS_GPU_COMPUTE_ASSOCIATED_JOB_RUN_ID"
+        )
+        if widget_job_run_id:
+            _logger.debug(f"SGC job run ID from dbutils widget: {widget_job_run_id}")
+            return widget_job_run_id
     except _NoDbutilsError:
         _logger.debug("dbutils not available, checking environment variable")
     except Exception as e:
         _logger.debug(f"Failed to retrieve SGC job run ID from dbutils widget: {e}", exc_info=True)
 
-    if job_run_id := _SERVERLESS_GPU_COMPUTE_ASSOCIATED_JOB_RUN_ID.get():
-        _logger.debug(f"SGC job run ID from environment variable: {job_run_id}")
-        return job_run_id
+    env_job_run_id: str | None = _SERVERLESS_GPU_COMPUTE_ASSOCIATED_JOB_RUN_ID.get()
+    if env_job_run_id:
+        _logger.debug(f"SGC job run ID from environment variable: {env_job_run_id}")
+        return env_job_run_id
 
     return None
 
@@ -1294,7 +1297,7 @@ def _print_databricks_deployment_job_url(
     job_id: str,
     workspace_url: str | None = None,
     workspace_id: str | None = None,
-) -> str:
+) -> str | None:
     if not workspace_url:
         workspace_url = get_workspace_url()
     if not workspace_id:
@@ -1324,7 +1327,7 @@ def _get_databricks_creds_config(tracking_uri):
 
     if profile and key_prefix:
         # legacy way to read credentials by setting `tracking_uri` to 'databricks://scope:prefix'
-        providers = [TrackingURIConfigProvider(tracking_uri)]
+        providers: list[Any] = [TrackingURIConfigProvider(tracking_uri)]
     elif profile:
         # If `tracking_uri` is 'databricks://<profile>'
         # MLflow should only read credentials from this profile
@@ -1644,7 +1647,9 @@ P = ParamSpec("P")
 T = TypeVar("T")
 
 
-def databricks_api_disabled(api_name: str = "This API", alternative: str | None = None):
+def databricks_api_disabled(
+    api_name: str = "This API", alternative: str | None = None
+) -> Callable[[Callable[P, T]], Callable[P, T]]:
     """
     Decorator that disables an API method when used with Databricks.
 
@@ -1728,4 +1733,5 @@ def invoke_databricks_app(
         method="POST",
         json=payload,
     )
-    return response.json()
+    response_json: dict[str, Any] = response.json()
+    return response_json

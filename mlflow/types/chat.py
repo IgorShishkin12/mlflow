@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 import warnings
-from typing import Annotated, Any, Literal
+from typing import Annotated, Any, Callable, Literal
 from uuid import uuid4
 
 from pydantic import BaseModel, ConfigDict, Field, model_serializer
@@ -100,7 +100,7 @@ class ToolCall(BaseModel):
     thought_signature: str | None = Field(default=None)
 
     @model_serializer(mode="wrap")
-    def _serialize(self, handler):
+    def _serialize(self, handler: Callable[[Any], dict[str, Any]]) -> dict[str, Any]:
         data = handler(self)
         if data.get("thought_signature") is None:
             data.pop("thought_signature", None)
@@ -293,7 +293,7 @@ class ChatUsage(BaseModel):
     prompt_tokens_details: PromptTokensDetails | None = None
 
     @model_serializer(mode="wrap")
-    def _serialize(self, handler):
+    def _serialize(self, handler: Callable[[Any], dict[str, Any]]) -> dict[str, Any]:
         data = handler(self)
         if data.get("prompt_tokens_details") is None:
             data.pop("prompt_tokens_details", None)
@@ -311,7 +311,7 @@ class ToolCallDelta(BaseModel):
     thought_signature: str | None = Field(default=None)
 
     @model_serializer(mode="wrap")
-    def _serialize(self, handler):
+    def _serialize(self, handler: Callable[[Any], dict[str, Any]]) -> dict[str, Any]:
         data = handler(self)
         if data.get("thought_signature") is None:
             data.pop("thought_signature", None)

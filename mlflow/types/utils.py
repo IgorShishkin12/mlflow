@@ -40,7 +40,7 @@ class TensorsNotSupportedException(MlflowException):
         super().__init__(f"Multidimensional arrays (aka tensors) are not supported. {msg}")
 
 
-def _get_tensor_shape(data, variable_dimension: int | None = 0) -> tuple[int, ...]:
+def _get_tensor_shape(data: Any, variable_dimension: int | None = 0) -> tuple[int, ...]:
     """Infer the shape of the inputted data.
 
     This method creates the shape of the tensor to store in the TensorSpec. The variable dimension
@@ -235,7 +235,7 @@ SCALAR_TO_DATATYPE_MAPPING: dict[type, DataType] = {
 }
 
 
-def _infer_scalar_datatype(data) -> DataType:
+def _infer_scalar_datatype(data: Any) -> DataType:
     if data_type := SCALAR_TO_DATATYPE_MAPPING.get(type(data)):
         return data_type
     if DataType.check_type(DataType.datetime, data):
@@ -462,7 +462,7 @@ def _infer_schema(data: Any) -> Schema:
     return schema
 
 
-def _infer_numpy_dtype(dtype) -> DataType:
+def _infer_numpy_dtype(dtype: Any) -> DataType:
     supported_types: type | tuple[type, ...] = np.dtype
 
     # noinspection PyBroadException
@@ -502,14 +502,16 @@ def _infer_numpy_dtype(dtype) -> DataType:
     raise MlflowException(f"Unsupported numpy data type '{dtype}', kind '{dtype.kind}'")
 
 
-def _is_none_or_nan(x):
+def _is_none_or_nan(x: Any) -> bool:
     if isinstance(x, float):
-        return np.isnan(x)
+        # Bridge to keep `np.isnan`'s numpy bool out of the declared bool return.
+        isnan: bool = np.isnan(x)
+        return isnan
     # NB: We can't use pd.isna() because the input can be a series.
     return x is None or x is pd.NA or x is pd.NaT
 
 
-def _infer_required(col) -> bool:
+def _infer_required(col: Any) -> bool:
     if isinstance(col, (list, pd.Series)):
         return not any(_is_none_or_nan(x) for x in col)
     return not _is_none_or_nan(col)
@@ -545,7 +547,9 @@ def _infer_pandas_column(col: pd.Series) -> COLSPEC_TYPES:
 # but neither an IntegralType, FloatType nor DoubleType), so this function can implicitly
 # return None at runtime despite the declared return type. Callers pass the result straight
 # into ColSpec, which then fails on None.
-def _infer_spark_type(x, data=None, col_name=None) -> DataType | Array | Object:  # type: ignore[return]
+def _infer_spark_type(  # type: ignore[return]
+    x: Any, data: Any = None, col_name: str | None = None
+) -> DataType | Array | Object:
     import pyspark.sql.types
     from pyspark.ml.linalg import VectorUDT
     from pyspark.sql.functions import col, collect_list
@@ -629,7 +633,7 @@ def _infer_spark_type(x, data=None, col_name=None) -> DataType | Array | Object:
         )
 
 
-def _is_spark_df(x) -> bool:
+def _is_spark_df(x: Any) -> bool:
     try:
         import pyspark.sql.dataframe
 
@@ -646,7 +650,9 @@ def _is_spark_df(x) -> bool:
         return False
 
 
-def _validate_input_dictionary_contains_only_strings_and_lists_of_strings(data) -> None:
+def _validate_input_dictionary_contains_only_strings_and_lists_of_strings(
+    data: dict[Any, Any],
+) -> None:
     # isinstance(True, int) is True
     invalid_keys = [
         key for key in data.keys() if not isinstance(key, (str, int)) or isinstance(key, bool)
@@ -699,7 +705,7 @@ def _get_array_depth(l: Any) -> int:
     return 0
 
 
-def _infer_type_and_shape(value):
+def _infer_type_and_shape(value: Any) -> tuple[COLSPEC_TYPES, tuple[int, ...] | None]:
     if isinstance(value, (list, np.ndarray)):
         ndim = _get_array_depth(value)
         if ndim != 1:
@@ -728,13 +734,15 @@ def _infer_type_and_shape(value):
         # necessary to make sure value is inferred as Object
         schema = _infer_schema({"value": value})
         object_type = schema.inputs[0].type
-        return object_type, None
+        # A dict-valued parameter always infers to an Object spec or a plain DataType;
+        # anything else fails ParamSpec construction below.
+        return cast(COLSPEC_TYPES, object_type), None
     raise MlflowException.invalid_parameter_value(
         f"Expected parameters to be 1D array or scalar, got {type(value).__name__}",
     )
 
 
-def _infer_param_schema(parameters: dict[str, Any]):
+def _infer_param_schema(parameters: dict[str, Any]) -> ParamSchema:
     if not isinstance(parameters, dict):
         raise MlflowException.invalid_parameter_value(
             f"Expected parameters to be dict, got {type(parameters).__name__}",
@@ -746,7 +754,15 @@ def _infer_param_schema(parameters: dict[str, Any]):
         try:
             value_type, shape = _infer_type_and_shape(value)
             param_specs.append(
-                ParamSpec(name=name, dtype=value_type, default=deepcopy(value), shape=shape)
+                ParamSpec(
+                    name=name,
+                    # Parameters only support DataType members and Object, which are the
+                    # only COLSPEC_TYPES members `_infer_type_and_shape` can yield for a
+                    # value it does not reject.
+                    dtype=cast("DataType | Object", value_type),
+                    default=deepcopy(value),
+                    shape=shape,
+                )
             )
         except Exception as e:
             invalid_params.append((name, value, e))
