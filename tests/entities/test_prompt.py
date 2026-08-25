@@ -5,15 +5,21 @@ from pydantic import ValidationError
 
 from mlflow.entities.model_registry import PromptModelConfig
 from mlflow.entities.model_registry.model_version import ModelVersion
+from mlflow.entities.model_registry.model_version_tag import ModelVersionTag
 from mlflow.entities.model_registry.prompt_version import (
     IS_PROMPT_TAG_KEY,
     PROMPT_TEXT_TAG_KEY,
     PromptVersion,
 )
 from mlflow.exceptions import MlflowException
-from mlflow.prompt.constants import PROMPT_MODEL_CONFIG_TAG_KEY
+from mlflow.prompt.constants import (
+    PROMPT_MODEL_CONFIG_TAG_KEY,
+    PROMPT_TYPE_CHAT,
+    PROMPT_TYPE_TAG_KEY,
+    RESPONSE_FORMAT_TAG_KEY,
+)
 from mlflow.prompt.registry_utils import model_version_to_prompt_version
-from mlflow.protos.model_registry_pb2 import ModelVersionTag
+from mlflow.protos.model_registry_pb2 import ModelVersion as ProtoModelVersion
 
 
 def test_prompt_initialization():
@@ -179,6 +185,79 @@ def test_prompt_from_model_version():
 
     with pytest.raises(MlflowException, match="Prompt `my-prompt` does not contain a prompt text"):
         model_version_to_prompt_version(invalid_model_version)
+
+
+def test_prompt_from_proto() -> None:
+    proto = ProtoModelVersion(
+        name="my-prompt",
+        version="1",
+        creation_timestamp=123,
+        last_updated_timestamp=456,
+        user_id="user",
+        aliases=["alias"],
+    )
+    proto.tags.add(key=IS_PROMPT_TAG_KEY, value="true")
+    proto.tags.add(key=PROMPT_TEXT_TAG_KEY, value="Hello, {{name}}!")
+    proto.description = "test"
+
+    prompt = PromptVersion.from_proto(proto)
+    assert prompt.name == "my-prompt"
+    assert prompt.version == 1
+    assert prompt.template == "Hello, {{name}}!"
+    assert prompt.commit_message == "test"
+    assert prompt.creation_timestamp == 123
+    assert prompt.last_updated_timestamp == 456
+    assert prompt.user_id == "user"
+    assert prompt.aliases == ["alias"]
+    assert prompt.response_format is None
+
+    # A proto without a description yields no commit message
+    bare_proto = ProtoModelVersion(name="my-prompt", version="2", creation_timestamp=789)
+    bare_proto.tags.add(key=IS_PROMPT_TAG_KEY, value="true")
+    bare_proto.tags.add(key=PROMPT_TEXT_TAG_KEY, value="Hi")
+    assert PromptVersion.from_proto(bare_proto).description is None
+
+
+def test_prompt_from_proto_chat_with_response_format() -> None:
+    messages = [{"role": "user", "content": "Hello"}]
+    proto = ProtoModelVersion(name="chat-prompt", version="1")
+    proto.tags.add(key=IS_PROMPT_TAG_KEY, value="true")
+    proto.tags.add(key=PROMPT_TEXT_TAG_KEY, value=json.dumps(messages))
+    proto.tags.add(key=PROMPT_TYPE_TAG_KEY, value=PROMPT_TYPE_CHAT)
+    proto.tags.add(key=RESPONSE_FORMAT_TAG_KEY, value=json.dumps({"type": "object"}))
+
+    prompt = PromptVersion.from_proto(proto)
+    assert prompt.is_text_prompt is False
+    assert prompt.template == messages
+    assert prompt.response_format == {"type": "object"}
+
+
+def test_prompt_from_proto_matches_entity_conversion() -> None:
+    tags = [
+        ModelVersionTag(key=IS_PROMPT_TAG_KEY, value="true"),
+        ModelVersionTag(key=PROMPT_TEXT_TAG_KEY, value="Hello!"),
+    ]
+    model_version = ModelVersion(
+        name="same-prompt",
+        version="3",
+        creation_timestamp=100,
+        last_updated_timestamp=200,
+        user_id="user",
+        aliases=["prod"],
+        tags=tags,
+    )
+    proto = ProtoModelVersion(
+        name="same-prompt",
+        version="3",
+        creation_timestamp=100,
+        last_updated_timestamp=200,
+        user_id="user",
+        aliases=["prod"],
+    )
+    for tag in tags:
+        proto.tags.add(key=tag.key, value=tag.value)
+
+    assert PromptVersion.from_proto(proto) == model_version_to_prompt_version(model_version)
 
 
 def test_prompt_with_model_config_dict():

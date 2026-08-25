@@ -1,5 +1,4 @@
 import functools
-import json
 import logging
 import re
 import threading
@@ -12,14 +11,7 @@ from mlflow.entities.model_registry.model_version import ModelVersion
 from mlflow.entities.model_registry.prompt_version import PromptVersion
 from mlflow.entities.model_registry.registered_model_tag import RegisteredModelTag
 from mlflow.exceptions import MlflowException
-from mlflow.prompt.constants import (
-    IS_PROMPT_TAG_KEY,
-    PROMPT_NAME_RULE,
-    PROMPT_TEXT_TAG_KEY,
-    PROMPT_TYPE_CHAT,
-    PROMPT_TYPE_TAG_KEY,
-    RESPONSE_FORMAT_TAG_KEY,
-)
+from mlflow.prompt.constants import IS_PROMPT_TAG_KEY, PROMPT_NAME_RULE
 from mlflow.protos.databricks_pb2 import INVALID_PARAMETER_VALUE, RESOURCE_ALREADY_EXISTS
 
 _logger = logging.getLogger(__name__)
@@ -104,40 +96,15 @@ def model_version_to_prompt_version(
     Returns:
         PromptVersion: The converted PromptVersion object.
     """
-    if IS_PROMPT_TAG_KEY not in model_version.tags:
-        raise MlflowException.invalid_parameter_value(
-            f"Name `{model_version.name}` is registered as a model, not a prompt. MLflow "
-            "does not allow registering a prompt with the same name as an existing model.",
-        )
-
-    if PROMPT_TEXT_TAG_KEY not in model_version.tags:
-        raise MlflowException.invalid_parameter_value(
-            f"Prompt `{model_version.name}` does not contain a prompt text"
-        )
-
-    if model_version.tags.get(PROMPT_TYPE_TAG_KEY) == PROMPT_TYPE_CHAT:
-        template = json.loads(model_version.tags[PROMPT_TEXT_TAG_KEY])
-    else:
-        template = model_version.tags[PROMPT_TEXT_TAG_KEY]
-
-    if RESPONSE_FORMAT_TAG_KEY in model_version.tags:
-        response_format = json.loads(model_version.tags[RESPONSE_FORMAT_TAG_KEY])
-    else:
-        response_format = None
-
-    # NB: _ModelRegistryEntity declares `from_proto` abstract, but PromptVersion deliberately
-    # has no proto representation (prompts are built from model-version tags instead).
-    return PromptVersion(  # type: ignore[abstract]
+    return PromptVersion._build_from_prompt_tags(
         name=model_version.name,
         version=int(model_version.version),
-        template=template,
-        commit_message=model_version.description,
-        creation_timestamp=model_version.creation_timestamp,
         tags=model_version.tags,
-        aliases=model_version.aliases,
+        description=model_version.description,
+        creation_timestamp=model_version.creation_timestamp,
         last_updated_timestamp=model_version.last_updated_timestamp,
         user_id=model_version.user_id,
-        response_format=response_format,
+        aliases=model_version.aliases,
     )
 
 
