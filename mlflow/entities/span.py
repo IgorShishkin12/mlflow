@@ -1267,7 +1267,7 @@ class LiveSpan(Span):
         # the manager treats unknown IDs as a miss. Whether the manager contract should
         # accept Optional IDs is deferred to maintainers (see MAINTAINER_FINDINGS.md #1).
         parent_span = trace_manager.get_span_from_id(
-            trace_id,
+            trace_id,  # type: ignore[arg-type]
             parent_span_id,  # type: ignore[arg-type]
         )
 
