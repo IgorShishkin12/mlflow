@@ -191,6 +191,7 @@ lint = [
   "skills",
   "pyyaml>=6.0.2",
   "types-PyYAML",
+  "types-protobuf",
   "packaging>=25.0",
   "aiohttp",
   "pytest",
@@ -598,6 +599,27 @@ disallow_incomplete_defs = false
 disallow_untyped_calls = false
 
 [[tool.mypy.overrides]]
+# Fully annotated modules graduated out of the relaxed `mlflow.*` block above:
+# every def in these groups carries complete param + return annotations.
+module = [
+  "mlflow.entities",
+  "mlflow.entities.*",
+  "mlflow.types",
+  "mlflow.types.agent",
+  "mlflow.types.chat",
+  "mlflow.types.llm",
+  "mlflow.types.responses",
+  "mlflow.types.responses_helpers",
+  "mlflow.types.schema",
+  "mlflow.types.type_hints",
+  "mlflow.types.utils",
+  "mlflow.utils.validation",
+]
+disallow_untyped_defs = true
+disallow_incomplete_defs = true
+disallow_untyped_calls = true
+
+[[tool.mypy.overrides]]
 # Generated protobuf modules: never hand-checked (excluded from ruff/clint for
 # the same reason); suppress all diagnostics raised within them.
 module = "mlflow.protos.*"
@@ -611,6 +633,7 @@ ignore_errors = true
 module = [
   "boto3.*",
   "botocore.*",
+  "fastmcp.*",
   "google.cloud.*",
   "google.resumable_media.*",
   "pandas.*",

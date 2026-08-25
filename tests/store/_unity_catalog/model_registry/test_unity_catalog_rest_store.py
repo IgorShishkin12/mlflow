@@ -10,6 +10,9 @@ import pandas as pd
 import pytest
 import yaml
 from botocore.client import BaseClient
+
+pytest.importorskip("google.cloud.storage")
+
 from google.cloud.storage import Client
 from requests import Response
 

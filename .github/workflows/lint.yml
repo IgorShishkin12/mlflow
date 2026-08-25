@@ -124,6 +124,13 @@ jobs:
         run: |
           uv run --no-project dev/check_function_signatures.py
 
+      # Strict-typing gate over the modules adopted so far (dev/mypy-adopted.txt).
+      # mypy exits non-zero on any error, which fails this step and the job.
+      - name: Run mypy
+        if: matrix.os == 'ubuntu-latest'
+        run: |
+          uv run --no-sync mypy $(cat dev/mypy-adopted.txt | tr '\n' ' ')
+
       - name: Check whitespace-only changes
         if: matrix.os == 'ubuntu-latest' && github.event_name == 'pull_request'
         env:
