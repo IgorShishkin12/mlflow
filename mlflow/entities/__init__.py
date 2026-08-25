@@ -3,6 +3,8 @@ The ``mlflow.entities`` module defines entities returned by the MLflow
 `REST API <../rest-api.html>`_.
 """
 
+from typing import Any
+
 from mlflow.entities.assessment import (
     Assessment,
     Expectation,
@@ -210,7 +212,7 @@ __all__ = [
 ]
 
 
-def __getattr__(name):
+def __getattr__(name: str) -> Any:
     """Lazy loading for EvaluationDataset to avoid circular imports."""
     if name == "EvaluationDataset":
         try:

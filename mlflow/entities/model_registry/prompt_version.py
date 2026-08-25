@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import json
 import re
-from typing import Any
+from typing import Any, cast
 
 from pydantic import BaseModel, Field, ValidationError
 
@@ -256,10 +256,12 @@ class PromptVersion(_ModelRegistryEntity):
 
     def __repr__(self) -> str:
         if self.is_text_prompt:
+            # A text prompt stores its template verbatim as a single string tag.
+            template_text = cast(str, self.template)
             text = (
-                self.template[:PROMPT_TEXT_DISPLAY_LIMIT] + "..."
-                if len(self.template) > PROMPT_TEXT_DISPLAY_LIMIT
-                else self.template
+                template_text[:PROMPT_TEXT_DISPLAY_LIMIT] + "..."
+                if len(template_text) > PROMPT_TEXT_DISPLAY_LIMIT
+                else template_text
             )
         else:
             message = json.dumps(self.template)
@@ -283,7 +285,9 @@ class PromptVersion(_ModelRegistryEntity):
         if self.is_text_prompt:
             return self._tags[PROMPT_TEXT_TAG_KEY]
         else:
-            return json.loads(self._tags[PROMPT_TEXT_TAG_KEY])
+            # Chat prompts store their messages as a JSON list of {role, content} dicts.
+            messages: list[dict[str, Any]] = json.loads(self._tags[PROMPT_TEXT_TAG_KEY])
+            return messages
 
     @property
     def is_text_prompt(self) -> bool:
@@ -307,7 +311,8 @@ class PromptVersion(_ModelRegistryEntity):
         """
         if RESPONSE_FORMAT_TAG_KEY not in self._tags:
             return None
-        return json.loads(self._tags[RESPONSE_FORMAT_TAG_KEY])
+        response_format: dict[str, Any] = json.loads(self._tags[RESPONSE_FORMAT_TAG_KEY])
+        return response_format
 
     @property
     def model_config(self) -> dict[str, Any] | None:
@@ -321,7 +326,8 @@ class PromptVersion(_ModelRegistryEntity):
         """
         if PROMPT_MODEL_CONFIG_TAG_KEY not in self._tags:
             return None
-        return json.loads(self._tags[PROMPT_MODEL_CONFIG_TAG_KEY])
+        model_config: dict[str, Any] = json.loads(self._tags[PROMPT_MODEL_CONFIG_TAG_KEY])
+        return model_config
 
     def to_single_brace_format(self) -> str | list[dict[str, Any]]:
         """
@@ -333,10 +339,12 @@ class PromptVersion(_ModelRegistryEntity):
             The template with variables converted from {{variable}} to {variable} format.
             For text prompts, returns a string. For chat prompts, returns a list of messages.
         """
-        t = self.template if self.is_text_prompt else json.dumps(self.template)
+        # A text prompt stores its template verbatim as a single string tag.
+        t = cast(str, self.template) if self.is_text_prompt else json.dumps(self.template)
         for var in self.variables:
             t = re.sub(r"\{\{\s*" + var + r"\s*\}\}", "{" + var + "}", t)
-        return t if self.is_text_prompt else json.loads(t)
+        result: str | list[dict[str, Any]] = t if self.is_text_prompt else json.loads(t)
+        return result
 
     @staticmethod
     def convert_response_format_to_dict(
@@ -391,7 +399,7 @@ class PromptVersion(_ModelRegistryEntity):
         return self._name
 
     @name.setter
-    def name(self, new_name: str):
+    def name(self, new_name: str) -> None:
         self._name = new_name
 
     @property
@@ -412,7 +420,7 @@ class PromptVersion(_ModelRegistryEntity):
         return self._last_updated_timestamp
 
     @last_updated_timestamp.setter
-    def last_updated_timestamp(self, updated_timestamp: int):
+    def last_updated_timestamp(self, updated_timestamp: int) -> None:
         self._last_updated_timestamp = updated_timestamp
 
     @property
@@ -421,7 +429,7 @@ class PromptVersion(_ModelRegistryEntity):
         return self._description
 
     @description.setter
-    def description(self, description: str):
+    def description(self, description: str) -> None:
         self._description = description
 
     @property
@@ -435,7 +443,7 @@ class PromptVersion(_ModelRegistryEntity):
         return self._aliases
 
     @aliases.setter
-    def aliases(self, aliases: list[str]):
+    def aliases(self, aliases: list[str]) -> None:
         self._aliases = aliases
 
     # Methods
@@ -444,14 +452,14 @@ class PromptVersion(_ModelRegistryEntity):
         # aggregate with base class properties since cls.__dict__ does not do it automatically
         return sorted(cls._get_properties_helper())
 
-    def _add_tag(self, tag: ModelVersionTag):
+    def _add_tag(self, tag: ModelVersionTag) -> None:
         self._tags[tag.key] = tag.value
 
     def format(
         self,
         allow_partial: bool = False,
         use_jinja_sandbox: bool = True,
-        **kwargs,
+        **kwargs: Any,
     ) -> PromptVersion | str | list[dict[str, Any]]:
         """
         Format the template with the given keyword arguments.
@@ -523,30 +531,36 @@ class PromptVersion(_ModelRegistryEntity):
             env = env_cls(undefined=Undefined)
 
             if self.is_text_prompt:
-                tmpl = env.from_string(self.template)
+                # A text prompt stores its template verbatim as a single string tag.
+                tmpl = env.from_string(cast(str, self.template))
                 return tmpl.render(**kwargs)
             else:
-                # Jinja2 rendering for chat prompts
+                # Jinja2 rendering for chat prompts; messages are a JSON list of dicts.
+                chat_messages = cast(list[dict[str, Any]], self.template)
                 return [
                     {
                         "role": message["role"],
                         "content": env.from_string(message.get("content", "")).render(**kwargs),
                     }
-                    for message in self.template
+                    for message in chat_messages
                 ]
 
         # Double-brace template formatting (native MLflow format)
+        template: str | list[dict[str, Any]]
         if self.is_text_prompt:
-            template = format_prompt(self.template, **kwargs)
+            template = format_prompt(cast(str, self.template), **kwargs)
         else:
             # For chat prompts, we need to handle JSON properly
             # Instead of working with JSON strings, work with the Python objects directly
+            chat_messages = cast(list[dict[str, Any]], self.template)
             template = [
                 {
                     "role": message["role"],
-                    "content": format_prompt(message.get("content"), **kwargs),
+                    # Messages are validated against ChatMessage at construction, so
+                    # `content` is always present.
+                    "content": format_prompt(cast(str, message.get("content")), **kwargs),
                 }
-                for message in self.template
+                for message in chat_messages
             ]
 
         input_keys = set(kwargs.keys())

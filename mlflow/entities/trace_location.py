@@ -41,10 +41,12 @@ class MlflowExperimentLocation(TraceLocationBase):
     Represents the location of an MLflow experiment.
 
     Args:
-        experiment_id: The ID of the MLflow experiment where the trace is stored.
+        experiment_id: The ID of the MLflow experiment where the trace is stored. May be
+            None when the destination experiment is not known yet (e.g. for in-progress
+            OTLP traces).
     """
 
-    experiment_id: str
+    experiment_id: str | None
 
     def to_proto(self) -> "pb.TraceLocation.MlflowExperimentLocation":
         return pb.TraceLocation.MlflowExperimentLocation(experiment_id=self.experiment_id)
@@ -260,14 +262,15 @@ class TraceLocationType(str, Enum):
     UC_SCHEMA = "UC_SCHEMA"
     UC_TABLE_PREFIX = "UC_TABLE_PREFIX"
 
-    def to_proto(self) -> int:
-        # `EnumTypeWrapper.Value` is untyped upstream; the typed local converts the
-        # resulting `Any` without adding a runtime call.
-        proto_value: int = pb.TraceLocation.TraceLocationType.Value(self)
+    def to_proto(self) -> "pb.TraceLocation.TraceLocationType.ValueType":
+        # `EnumTypeWrapper.Value` converts the enum name to its proto integer value.
+        proto_value: pb.TraceLocation.TraceLocationType.ValueType = (
+            pb.TraceLocation.TraceLocationType.Value(self)
+        )
         return proto_value
 
     @classmethod
-    def from_proto(cls, proto: int) -> "TraceLocationType":
+    def from_proto(cls, proto: pb.TraceLocation.TraceLocationType.ValueType) -> "TraceLocationType":
         return TraceLocationType(pb.TraceLocation.TraceLocationType.Name(proto))
 
     @classmethod
@@ -360,28 +363,22 @@ class TraceLocation(_MlflowObject):
         )
 
     def to_proto(self) -> pb.TraceLocation:
-        # The proto enum field is typed as its EnumTypeWrapper class; cast the raw int
-        # produced by `TraceLocationType.to_proto()` back for the generated constructor.
         if self.mlflow_experiment:
             return pb.TraceLocation(
-                type=cast("pb.TraceLocation.TraceLocationType", self.type.to_proto()),
+                type=self.type.to_proto(),
                 mlflow_experiment=self.mlflow_experiment.to_proto(),
             )
         elif self.inference_table:
             return pb.TraceLocation(
-                type=cast("pb.TraceLocation.TraceLocationType", self.type.to_proto()),
+                type=self.type.to_proto(),
                 inference_table=self.inference_table.to_proto(),
             )
         elif self.uc_table_prefix:
-            return pb.TraceLocation(
-                type=cast("pb.TraceLocation.TraceLocationType", self.type.to_proto())
-            )
+            return pb.TraceLocation(type=self.type.to_proto())
         # uc schema is not supported in to_proto since it's databricks specific, should use
         # databricks_service_utils to convert to proto
         else:
-            return pb.TraceLocation(
-                type=cast("pb.TraceLocation.TraceLocationType", self.type.to_proto())
-            )
+            return pb.TraceLocation(type=self.type.to_proto())
 
     @classmethod
     def from_proto(cls, proto: pb.TraceLocation | ProtoDatabricksTraceLocation) -> "TraceLocation":
@@ -392,7 +389,7 @@ class TraceLocation(_MlflowObject):
         return trace_location_from_proto(cast(ProtoDatabricksTraceLocation, proto))
 
     @classmethod
-    def from_experiment_id(cls, experiment_id: str) -> "TraceLocation":
+    def from_experiment_id(cls, experiment_id: str | None) -> "TraceLocation":
         return cls(
             type=TraceLocationType.MLFLOW_EXPERIMENT,
             mlflow_experiment=MlflowExperimentLocation(experiment_id=experiment_id),

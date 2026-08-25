@@ -56,7 +56,7 @@ class Experiment(_MlflowObject):
         """String name of the experiment."""
         return self._name
 
-    def _set_name(self, new_name):
+    def _set_name(self, new_name: str) -> None:
         self._name = new_name
 
     @property
@@ -74,21 +74,21 @@ class Experiment(_MlflowObject):
         """Tags that have been set on the experiment."""
         return self._tags
 
-    def _add_tag(self, tag):
+    def _add_tag(self, tag: ExperimentTag) -> None:
         self._tags[tag.key] = tag.value
 
     @property
     def creation_time(self) -> int | None:
         return self._creation_time
 
-    def _set_creation_time(self, creation_time):
+    def _set_creation_time(self, creation_time: int | None) -> None:
         self._creation_time = creation_time
 
     @property
     def last_update_time(self) -> int | None:
         return self._last_update_time
 
-    def _set_last_update_time(self, last_update_time):
+    def _set_last_update_time(self, last_update_time: int | None) -> None:
         self._last_update_time = last_update_time
 
     @property

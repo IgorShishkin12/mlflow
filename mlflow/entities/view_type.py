@@ -31,7 +31,7 @@ class ViewType:
         return cls._VIEW_TO_STRING[view_type]
 
     @classmethod
-    def to_proto(cls, view_type: int) -> service_pb2.ViewType:
+    def to_proto(cls, view_type: int) -> service_pb2.ViewType.ValueType:
         if view_type == cls.ACTIVE_ONLY:
             return service_pb2.ACTIVE_ONLY
         elif view_type == cls.DELETED_ONLY:
@@ -41,7 +41,7 @@ class ViewType:
         raise ValueError(f"Unexpected view_type: {view_type}")
 
     @classmethod
-    def from_proto(cls, proto_view_type: service_pb2.ViewType) -> int:
+    def from_proto(cls, proto_view_type: service_pb2.ViewType.ValueType) -> int:
         if proto_view_type == service_pb2.ACTIVE_ONLY:
             return cls.ACTIVE_ONLY
         elif proto_view_type == service_pb2.DELETED_ONLY:

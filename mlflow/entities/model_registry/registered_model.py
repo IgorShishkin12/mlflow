@@ -57,7 +57,7 @@ class RegisteredModel(_ModelRegistryEntity):
         return self._name
 
     @name.setter
-    def name(self, new_name: str):
+    def name(self, new_name: str) -> None:
         self._name = new_name
 
     @property
@@ -73,7 +73,7 @@ class RegisteredModel(_ModelRegistryEntity):
         return self._last_updated_timestamp
 
     @last_updated_timestamp.setter
-    def last_updated_timestamp(self, updated_timestamp: int):
+    def last_updated_timestamp(self, updated_timestamp: int) -> None:
         self._last_updated_timestamp = updated_timestamp
 
     @property
@@ -82,7 +82,7 @@ class RegisteredModel(_ModelRegistryEntity):
         return self._description
 
     @description.setter
-    def description(self, description: str):
+    def description(self, description: str) -> None:
         self._description = description
 
     @property
@@ -93,7 +93,7 @@ class RegisteredModel(_ModelRegistryEntity):
         return self._latest_version
 
     @latest_versions.setter
-    def latest_versions(self, latest_versions: list[ModelVersion]):
+    def latest_versions(self, latest_versions: list[ModelVersion]) -> None:
         self._latest_version = latest_versions
 
     @property
@@ -102,7 +102,7 @@ class RegisteredModel(_ModelRegistryEntity):
         # Remove the is_prompt tag as it should not be user-facing
         return {k: v for k, v in self._tags.items() if k != IS_PROMPT_TAG_KEY}
 
-    def _is_prompt(self):
+    def _is_prompt(self) -> bool:
         """Check if the registered model is a prompt."""
         return self._tags.get(IS_PROMPT_TAG_KEY, "false").lower() == "true"
 
@@ -117,14 +117,14 @@ class RegisteredModel(_ModelRegistryEntity):
         return self._workspace
 
     @classmethod
-    def _properties(cls):
+    def _properties(cls) -> list[str]:
         # aggregate with base class properties since cls.__dict__ does not do it automatically
         return sorted(cls._get_properties_helper())
 
-    def _add_tag(self, tag):
+    def _add_tag(self, tag: RegisteredModelTag) -> None:
         self._tags[tag.key] = tag.value
 
-    def _add_alias(self, alias):
+    def _add_alias(self, alias: RegisteredModelAlias) -> None:
         self._aliases[alias.alias] = alias.version
 
     @property
@@ -133,7 +133,7 @@ class RegisteredModel(_ModelRegistryEntity):
         return self._deployment_job_id
 
     @deployment_job_id.setter
-    def deployment_job_id(self, deployment_job_id: str):
+    def deployment_job_id(self, deployment_job_id: str) -> None:
         self._deployment_job_id = deployment_job_id
 
     @property
@@ -180,10 +180,10 @@ class RegisteredModel(_ModelRegistryEntity):
         if self.deployment_job_id:
             rmd.deployment_job_id = self.deployment_job_id
         if self.deployment_job_state:
-            # The generated pb2 stubs type proto enum fields as EnumTypeWrapper subclasses, so
-            # cast the plain int returned by from_string to the proto enum type of this field.
+            # The generated pb2 stubs type proto enum fields as the enums' `ValueType` (a
+            # NewType over int), so cast the plain int returned by from_string to it.
             rmd.deployment_job_state = cast(
-                ProtoDeploymentJobConnection.State,
+                ProtoDeploymentJobConnection.State.ValueType,
                 RegisteredModelDeploymentJobState.from_string(self.deployment_job_state),
             )
         rmd.tags.extend([

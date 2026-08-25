@@ -5,8 +5,8 @@ import time
 from dataclasses import dataclass
 from typing import Any, cast
 
-from google.protobuf.json_format import MessageToDict, ParseDict  # type: ignore[import-untyped]
-from google.protobuf.struct_pb2 import Value  # type: ignore[import-untyped]
+from google.protobuf.json_format import MessageToDict, ParseDict
+from google.protobuf.struct_pb2 import Value
 
 from mlflow.entities._mlflow_object import _MlflowObject
 from mlflow.entities.assessment_error import AssessmentError
@@ -130,9 +130,10 @@ class Assessment(_MlflowObject):
 
         assessment.source.CopyFrom(self.source.to_proto())
 
-        # Convert time in milliseconds to protobuf Timestamp
-        assessment.create_time.FromMilliseconds(self.create_time_ms)
-        assessment.last_update_time.FromMilliseconds(self.last_update_time_ms)
+        # Convert time in milliseconds to protobuf Timestamp; `__post_init__` guarantees
+        # both timestamps are set, hence the narrowing casts.
+        assessment.create_time.FromMilliseconds(cast(int, self.create_time_ms))
+        assessment.last_update_time.FromMilliseconds(cast(int, self.last_update_time_ms))
 
         if self.span_id is not None:
             assessment.span_id = self.span_id
@@ -569,7 +570,9 @@ class IssueReference(Assessment):
         cast("IssueReferenceValue", self.issue).issue_name = issue_name
 
     @classmethod
-    def from_proto(cls, proto: ProtoAssessment) -> "IssueReference":
+    # NB: intentional contravariant narrowing — the v4 (Databricks tracing) Assessment
+    # proto carries no issue references, so only the v3 proto is accepted here.
+    def from_proto(cls, proto: ProtoAssessment) -> "IssueReference":  # type: ignore[override]
         # NB: The v4 (Databricks tracing) Assessment proto does not carry issue
         # references, so only the v3 proto can be converted here.
         from mlflow.utils.databricks_tracing_utils import get_trace_id_from_assessment_proto
@@ -687,7 +690,7 @@ class ExpectationValue(_MlflowObject):
                 "representation of an Expectation."
             )
 
-    def _need_serialization(self):
+    def _need_serialization(self) -> bool:
         # Values like None, lists, dicts, should be serialized as a JSON string
         return self.value is not None and not isinstance(self.value, (int, float, bool, str))
 
@@ -702,7 +705,14 @@ class FeedbackValue(_MlflowObject):
 
     def to_proto(self) -> ProtoFeedback:
         return ProtoFeedback(
-            value=ParseDict(self.value, Value(), ignore_unknown_fields=True),
+            # NB: ParseDict's stub requires dict, but the runtime contract accepts the
+            # full JSON-value union (all 7 shapes verified working; see
+            # MAINTAINER_FINDINGS.md #7).
+            value=ParseDict(
+                self.value,  # type: ignore[arg-type]
+                Value(),
+                ignore_unknown_fields=True,
+            ),
             error=self.error.to_proto() if self.error else None,
         )
 

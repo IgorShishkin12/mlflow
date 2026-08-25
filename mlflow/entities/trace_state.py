@@ -1,4 +1,5 @@
 from enum import Enum
+from typing import cast
 
 from opentelemetry import trace as trace_api
 
@@ -22,15 +23,17 @@ class TraceState(str, Enum):
     def __str__(self) -> str:
         return self.value
 
-    def to_proto(self) -> int:
-        # `EnumTypeWrapper.Value` is untyped upstream; the typed local converts the
-        # resulting `Any` without adding a runtime call.
-        proto_value: int = pb.TraceInfoV3.State.Value(self)
+    def to_proto(self) -> "pb.TraceInfoV3.State.ValueType":
+        # `EnumTypeWrapper.Value` converts the enum name to its proto integer value.
+        proto_value: pb.TraceInfoV3.State.ValueType = pb.TraceInfoV3.State.Value(self)
         return proto_value
 
     @classmethod
     def from_proto(cls, proto: int) -> "TraceState":
-        return TraceState(pb.TraceInfoV3.State.Name(proto))
+        # Callers pass state values from several proto modules (service TraceInfoV3 and the
+        # Databricks TraceInfo V4), whose generated `ValueType` aliases are distinct static
+        # types over the same integer enum, hence the cast to the canonical alias here.
+        return TraceState(pb.TraceInfoV3.State.Name(cast(pb.TraceInfoV3.State.ValueType, proto)))
 
     @staticmethod
     def from_otel_status(otel_status: trace_api.Status) -> "TraceState":

@@ -179,7 +179,7 @@ class LoggedModel(_MlflowObject):
         # aggregate with base class properties since cls.__dict__ does not do it automatically
         return sorted(cls._get_properties_helper())
 
-    def _add_tag(self, tag):
+    def _add_tag(self, tag: LoggedModelTag) -> None:
         self._tags[tag.key] = tag.value
 
     def to_dictionary(self) -> dict[str, Any]:

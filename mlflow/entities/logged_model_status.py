@@ -16,14 +16,14 @@ class LoggedModelStatus(str, Enum):
         return self.value
 
     @staticmethod
-    def is_finalized(status) -> bool:
+    def is_finalized(status: "LoggedModelStatus") -> bool:
         """
         Determines whether or not a LoggedModelStatus is a finalized status.
         A finalized status indicates that no further status updates will occur.
         """
         return status in [LoggedModelStatus.READY, LoggedModelStatus.FAILED]
 
-    def to_proto(self):
+    def to_proto(self) -> "pb2.LoggedModelStatus.ValueType":
         if self == LoggedModelStatus.UNSPECIFIED:
             return pb2.LoggedModelStatus.LOGGED_MODEL_STATUS_UNSPECIFIED
         elif self == LoggedModelStatus.PENDING:
@@ -36,7 +36,7 @@ class LoggedModelStatus(str, Enum):
         raise MlflowException.invalid_parameter_value(f"Unknown model status: {self}")
 
     @classmethod
-    def from_proto(cls, proto):
+    def from_proto(cls, proto: int) -> "LoggedModelStatus":
         if proto == pb2.LoggedModelStatus.LOGGED_MODEL_STATUS_UNSPECIFIED:
             return LoggedModelStatus.UNSPECIFIED
         elif proto == pb2.LoggedModelStatus.LOGGED_MODEL_PENDING:

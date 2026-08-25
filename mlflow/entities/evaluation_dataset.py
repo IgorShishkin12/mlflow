@@ -118,7 +118,7 @@ class EvaluationDataset(_MlflowObject, Dataset, PyFuncConvertibleDatasetMixin):
         """Set experiment IDs directly."""
         self._experiment_ids = value or []
 
-    def _load_experiment_ids(self):
+    def _load_experiment_ids(self) -> None:
         """Load experiment IDs from the backend."""
         from mlflow.tracking._tracking_service.utils import _get_store
 

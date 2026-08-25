@@ -72,11 +72,19 @@ class RunInfo(_MlflowObject):
             return self.__dict__ == other.__dict__
         return False
 
-    def _copy_with_overrides(self, status=None, end_time=None, lifecycle_stage=None, run_name=None):
+    def _copy_with_overrides(
+        self,
+        status: str | int | None = None,
+        end_time: int | None = None,
+        lifecycle_stage: str | None = None,
+        run_name: str | None = None,
+    ) -> RunInfo:
         """A copy of the RunInfo with certain attributes modified."""
         proto = self.to_proto()
         if status:
-            proto.status = status
+            # Callers pass either the proto enum value or its name; protobuf accepts
+            # both at runtime, but the generated stubs type the field as `ValueType`.
+            proto.status = cast(ProtoRunStatus.ValueType, status)
         if end_time:
             proto.end_time = end_time
         if lifecycle_stage:
@@ -100,7 +108,7 @@ class RunInfo(_MlflowObject):
         """String containing run name."""
         return self._run_name
 
-    def _set_run_name(self, new_name):
+    def _set_run_name(self, new_name: str) -> None:
         self._run_name = new_name
 
     @searchable_attribute
@@ -147,9 +155,9 @@ class RunInfo(_MlflowObject):
             proto.run_name = self.run_name
         proto.experiment_id = self.experiment_id
         proto.user_id = self.user_id
-        # The proto field is typed as the protobuf enum wrapper (an int subclass), while
+        # The proto field is typed as the enum's `ValueType` (a NewType over int), while
         # `RunStatus.from_string` returns a plain `int`, hence the cast.
-        proto.status = cast(ProtoRunStatus, RunStatus.from_string(self.status))
+        proto.status = cast(ProtoRunStatus.ValueType, RunStatus.from_string(self.status))
         proto.start_time = self.start_time
         if self.end_time:
             proto.end_time = self.end_time

@@ -190,6 +190,6 @@ class AssessmentSourceType:
         return str(AssessmentSourceType(source_type))
 
     @classmethod
-    def from_proto(cls, proto_source_type: int) -> str:
+    def from_proto(cls, proto_source_type: ProtoAssessmentSource.SourceType.ValueType) -> str:
         source_type_name: str = ProtoAssessmentSource.SourceType.Name(proto_source_type)
         return source_type_name

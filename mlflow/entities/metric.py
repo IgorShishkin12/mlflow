@@ -191,7 +191,9 @@ class MetricWithRunId(Metric):
             "run_id": self.run_id,
         }
 
-    def to_proto(self) -> ProtoMetricWithRunId:
+    # NB: intentionally violates LSP — the subclass proto carries an extra run_id
+    # field, and the two generated Metric messages are structurally unrelated types.
+    def to_proto(self) -> ProtoMetricWithRunId:  # type: ignore[override]
         metric = ProtoMetricWithRunId()
         metric.key = self.key
         metric.value = self.value

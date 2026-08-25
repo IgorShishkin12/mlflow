@@ -1,6 +1,6 @@
 import json
 from functools import cached_property
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, cast
 
 from mlflow.entities._mlflow_object import _MlflowObject
 from mlflow.protos.service_pb2 import Scorer as ProtoScorer
@@ -162,8 +162,9 @@ class ScorerVersion(_MlflowObject):
             and should not typically be called directly by users.
         """
         return cls(
-            # The proto stores experiment IDs as integers while the entity contract is str
-            experiment_id=proto.experiment_id,  # type: ignore[arg-type]
+            # The proto stores experiment IDs as integers while the entity contract is str;
+            # the value is passed through unchanged and asserted against the entity contract.
+            experiment_id=cast(str, proto.experiment_id),
             scorer_name=proto.scorer_name,
             scorer_version=proto.scorer_version,
             serialized_scorer=proto.serialized_scorer,

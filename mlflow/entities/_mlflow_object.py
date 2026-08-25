@@ -1,5 +1,4 @@
 import pprint
-from abc import abstractmethod
 from collections.abc import Iterator
 from functools import cached_property
 from typing import Any
@@ -12,18 +11,21 @@ class _MlflowObject:
             yield prop, self.__getattribute__(prop)
 
     @classmethod
-    def _get_properties_helper(cls):
+    def _get_properties_helper(cls) -> list[str]:
         return sorted([
             p for p in cls.__dict__ if isinstance(getattr(cls, p), (property, cached_property))
         ])
 
     @classmethod
-    def _properties(cls):
+    def _properties(cls) -> list[str]:
         return cls._get_properties_helper()
 
     @classmethod
-    @abstractmethod
-    def from_proto(cls, proto: Any) -> "_MlflowObject":
+    def from_proto(cls, proto: Any) -> Any:
+        # Not decorated with @abstractmethod: this base class is not an ABC (no ABCMeta),
+        # so the decorator had no runtime effect, and several concrete entities (e.g.
+        # Link, SpanEvent) intentionally convert to protos through other helpers only.
+        # Concrete subclasses override this with their precise proto mapping signature.
         pass
 
     @classmethod
@@ -53,5 +55,5 @@ class _MlflowObjectPrinter:
             return f"<{get_classname(obj)}: {self._entity_to_string(obj)}>"
         return self.printer.pformat(obj)
 
-    def _entity_to_string(self, entity):
+    def _entity_to_string(self, entity: _MlflowObject) -> str:
         return ", ".join([f"{key}={self.to_string(value)}" for key, value in entity])

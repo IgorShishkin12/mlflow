@@ -148,7 +148,7 @@ class ModelVersion(_ModelRegistryEntity):
         """Dictionary of tag key (string) -> tag value for the current model version."""
         return self._tags
 
-    def _is_prompt(self):
+    def _is_prompt(self) -> bool:
         """Check if the model version is a prompt version."""
         return self._tags.get(IS_PROMPT_TAG_KEY, "false").lower() == "true"
 
@@ -190,7 +190,7 @@ class ModelVersion(_ModelRegistryEntity):
         # aggregate with base class properties since cls.__dict__ does not do it automatically
         return sorted(cls._get_properties_helper())
 
-    def _add_tag(self, tag: ModelVersionTag):
+    def _add_tag(self, tag: ModelVersionTag) -> None:
         self._tags[tag.key] = tag.value
 
     # proto mappers
@@ -211,7 +211,9 @@ class ModelVersion(_ModelRegistryEntity):
             ModelVersionStatus.to_string(proto.status),
             proto.status_message if proto.HasField("status_message") else None,
             run_link=proto.run_link,
-            aliases=proto.aliases,
+            # The generated stubs type repeated scalar fields as protobuf containers, while
+            # the entity API stores plain lists; the container is list-compatible at runtime.
+            aliases=cast("list[str]", proto.aliases),
             deployment_job_state=ModelVersionDeploymentJobState.from_proto(
                 proto.deployment_job_state
             ),
@@ -243,10 +245,10 @@ class ModelVersion(_ModelRegistryEntity):
         if self.run_link is not None:
             model_version.run_link = str(self.run_link)
         if self.status is not None:
-            # The proto field is typed as the protobuf enum wrapper (an int subclass), while
+            # The proto field is typed as the enum's `ValueType` (a NewType over int), while
             # `ModelVersionStatus.from_string` returns a plain `int`, hence the cast.
             model_version.status = cast(
-                ProtoModelVersionStatus, ModelVersionStatus.from_string(self.status)
+                ProtoModelVersionStatus.ValueType, ModelVersionStatus.from_string(self.status)
             )
         if self.status_message:
             model_version.status_message = self.status_message

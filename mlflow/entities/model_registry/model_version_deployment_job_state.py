@@ -15,6 +15,9 @@ from mlflow.protos.databricks_uc_registry_messages_pb2 import (
 from mlflow.protos.databricks_uc_registry_messages_pb2 import (
     ModelVersionDeploymentJobState as ProtoModelVersionDeploymentJobState,
 )
+from mlflow.protos.model_registry_pb2 import (
+    ModelVersionDeploymentJobState as ProtoRegistryModelVersionDeploymentJobState,
+)
 
 
 class ModelVersionDeploymentJobState(_ModelRegistryEntity):
@@ -61,8 +64,11 @@ class ModelVersionDeploymentJobState(_ModelRegistryEntity):
 
     @classmethod
     def from_proto(
-        cls, proto: ProtoModelVersionDeploymentJobState
+        cls,
+        proto: ProtoModelVersionDeploymentJobState | ProtoRegistryModelVersionDeploymentJobState,
     ) -> ModelVersionDeploymentJobState:
+        # The registry and Databricks UC protos define structurally identical
+        # ModelVersionDeploymentJobState messages; both are accepted here.
         return cls(
             job_id=proto.job_id,
             run_id=proto.run_id,
@@ -77,16 +83,16 @@ class ModelVersionDeploymentJobState(_ModelRegistryEntity):
             state.job_id = self.job_id
         if self.run_id is not None:
             state.run_id = self.run_id
-        # The proto fields are typed as protobuf enum wrappers (int subclasses), while
+        # The proto fields are typed as the enums' `ValueType` (a NewType over int), while
         # `from_string` returns a plain `int`, hence the casts.
         if self.job_state is not None:
             state.job_state = cast(
-                DeploymentJobConnection.State,
+                DeploymentJobConnection.State.ValueType,
                 RegisteredModelDeploymentJobState.from_string(self.job_state),
             )
         if self.run_state is not None:
             state.run_state = cast(
-                ProtoModelVersionDeploymentJobState.DeploymentJobRunState,
+                ProtoModelVersionDeploymentJobState.DeploymentJobRunState.ValueType,
                 ModelVersionDeploymentJobRunState.from_string(self.run_state),
             )
         if self.current_task_name is not None:

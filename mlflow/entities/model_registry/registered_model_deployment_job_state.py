@@ -12,10 +12,10 @@ class RegisteredModelDeploymentJobState:
     REQUIRED_PARAMETERS_CHANGED: int = DeploymentJobConnection.State.Value(
         "REQUIRED_PARAMETERS_CHANGED"
     )
-    _STRING_TO_STATE = {
+    _STRING_TO_STATE: dict[str, int] = {
         k: DeploymentJobConnection.State.Value(k) for k in DeploymentJobConnection.State.keys()
     }
-    _STATE_TO_STRING = {value: key for key, value in _STRING_TO_STATE.items()}
+    _STATE_TO_STRING: dict[int, str] = {value: key for key, value in _STRING_TO_STATE.items()}
 
     @staticmethod
     def from_string(state_str: str) -> int:

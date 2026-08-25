@@ -2,9 +2,9 @@ import json
 from dataclasses import dataclass, field
 from typing import Any, cast
 
-from google.protobuf.duration_pb2 import Duration  # type: ignore[import-untyped]
-from google.protobuf.json_format import MessageToDict  # type: ignore[import-untyped]
-from google.protobuf.timestamp_pb2 import Timestamp  # type: ignore[import-untyped]
+from google.protobuf.duration_pb2 import Duration
+from google.protobuf.json_format import MessageToDict
+from google.protobuf.timestamp_pb2 import Timestamp
 
 from mlflow.entities._mlflow_object import _MlflowObject
 from mlflow.entities.assessment import Assessment
@@ -120,8 +120,7 @@ class TraceInfo(_MlflowObject):
             response_preview=self.response_preview,
             request_time=request_time,
             execution_duration=execution_duration,
-            # The proto enum field is typed as its EnumTypeWrapper class; cast the raw int back.
-            state=cast(ProtoTraceInfoV3.State, self.state.to_proto()),
+            state=self.state.to_proto(),
             trace_metadata=_truncate_request_metadata(self.trace_metadata),
             tags=_truncate_tags(self.tags),
             assessments=[a.to_proto() for a in self.assessments],
@@ -189,7 +188,8 @@ class TraceInfo(_MlflowObject):
 
     @experiment_id.setter
     def experiment_id(self, value: str | None) -> None:
-        # Assumes the location is an MLflow experiment; raises AttributeError otherwise.
+        # Assumes the location is an MLflow experiment; the intentional AttributeError
+        # on other location kinds is the documented contract here.
         self.trace_location.mlflow_experiment.experiment_id = value  # type: ignore[union-attr]
 
     @property

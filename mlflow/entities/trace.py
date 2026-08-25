@@ -4,7 +4,7 @@ import json
 import logging
 import re
 from dataclasses import dataclass
-from typing import TYPE_CHECKING, Any, Literal
+from typing import TYPE_CHECKING, Any, Literal, cast
 
 from mlflow.entities._mlflow_object import _MlflowObject
 from mlflow.entities.span import Span, SpanType
@@ -76,7 +76,7 @@ class Trace(_MlflowObject):
             )
         return cls.from_dict(trace_dict)
 
-    def _serialize_for_mimebundle(self):
+    def _serialize_for_mimebundle(self) -> str:
         # databricks notebooks will use the trace ID to
         # fetch the trace from the backend. including the
         # full JSON can cause notebooks to exceed size limits
@@ -87,7 +87,9 @@ class Trace(_MlflowObject):
             "sql_warehouse_id": MLFLOW_TRACING_SQL_WAREHOUSE_ID.get(),
         })
 
-    def _repr_mimebundle_(self, include=None, exclude=None):
+    def _repr_mimebundle_(
+        self, include: list[str] | None = None, exclude: list[str] | None = None
+    ) -> dict[str, str]:
         """
         This method is used to trigger custom display logic in IPython notebooks.
         See https://ipython.readthedocs.io/en/stable/config/integrating.html#MyObject
@@ -123,18 +125,20 @@ class Trace(_MlflowObject):
             "request_time": self.info.request_time,
             "execution_duration": self.info.execution_duration,
             # The helper passes non-JSON values (including None) through unchanged, so the
-            # optional request/response fields are safe to pass despite its `str` annotation.
-            "request": self._deserialize_json_attr(self.data.request),  # type: ignore[arg-type]
-            "response": self._deserialize_json_attr(self.data.response),  # type: ignore[arg-type]
+            # optional request/response fields are safe to pass.
+            "request": self._deserialize_json_attr(self.data.request),
+            "response": self._deserialize_json_attr(self.data.response),
             "trace_metadata": self.info.trace_metadata,
             "tags": self.info.tags,
             "spans": [span.to_dict() for span in self.data.spans],
             "assessments": [assessment.to_dictionary() for assessment in self.info.assessments],
         }
 
-    def _deserialize_json_attr(self, value: str):
+    def _deserialize_json_attr(self, value: str | None) -> Any:
         try:
-            return json.loads(value)
+            # json.loads rejects None; that TypeError is swallowed by the handler below,
+            # which returns the raw value unchanged, hence the narrowing cast.
+            return json.loads(cast("str", value))
         except Exception:
             _logger.debug(f"Failed to deserialize JSON attribute: {value}", exc_info=True)
             return value
@@ -320,7 +324,10 @@ class Trace(_MlflowObject):
         """
 
         return ProtoTrace(
-            trace_info=self.info.to_proto(),
+            # NB: to_proto returns the V3|V4 union; the OSS backend proto accepts the V3
+            # shape (V4 is Databricks-only). Which sink takes which union member is a
+            # maintainer question (MAINTAINER_FINDINGS.md #7).
+            trace_info=self.info.to_proto(),  # type: ignore[arg-type]
             spans=[span.to_otel_proto() for span in self.data.spans],
         )
 

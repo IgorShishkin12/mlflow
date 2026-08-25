@@ -1,6 +1,5 @@
 from dataclasses import dataclass
 from enum import Enum
-from typing import cast
 
 from mlflow.entities._mlflow_object import _MlflowObject
 from mlflow.protos import service_pb2 as pb
@@ -14,14 +13,13 @@ class MetricViewType(str, Enum):
     def __str__(self) -> str:
         return self.value
 
-    def to_proto(self) -> int:
-        # `EnumTypeWrapper.Value` is untyped upstream; the typed local converts the
-        # resulting `Any` without adding a runtime call.
-        proto_value: int = pb.MetricViewType.Value(self)
+    def to_proto(self) -> "pb.MetricViewType.ValueType":
+        # `EnumTypeWrapper.Value` converts the enum name to its proto integer value.
+        proto_value: pb.MetricViewType.ValueType = pb.MetricViewType.Value(self)
         return proto_value
 
     @classmethod
-    def from_proto(cls, proto: int) -> "MetricViewType":
+    def from_proto(cls, proto: pb.MetricViewType.ValueType) -> "MetricViewType":
         return cls(pb.MetricViewType.Name(proto))
 
 
@@ -36,10 +34,9 @@ class AggregationType(str, Enum):
     def __str__(self) -> str:
         return self.value
 
-    def to_proto(self) -> int:
-        # `EnumTypeWrapper.Value` is untyped upstream; the typed local converts the
-        # resulting `Any` without adding a runtime call.
-        proto_value: int = pb.AggregationType.Value(self)
+    def to_proto(self) -> "pb.AggregationType.ValueType":
+        # `EnumTypeWrapper.Value` converts the enum name to its proto integer value.
+        proto_value: pb.AggregationType.ValueType = pb.AggregationType.Value(self)
         return proto_value
 
 
@@ -69,8 +66,7 @@ class MetricAggregation(_MlflowObject):
 
     def to_proto(self) -> pb.MetricAggregation:
         proto = pb.MetricAggregation()
-        # The proto enum field is typed as its EnumTypeWrapper class; cast the raw int back.
-        proto.aggregation_type = cast(pb.AggregationType, self.aggregation_type.to_proto())
+        proto.aggregation_type = self.aggregation_type.to_proto()
         if self.percentile_value is not None:
             proto.percentile_value = self.percentile_value
         return proto

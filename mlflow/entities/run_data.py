@@ -56,14 +56,14 @@ class RunData(_MlflowObject):
         """Dictionary of tag key (string) -> tag value for the current run."""
         return self._tags
 
-    def _add_metric(self, metric):
+    def _add_metric(self, metric: Metric) -> None:
         self._metrics[metric.key] = metric.value
         self._metric_objs.append(metric)
 
-    def _add_param(self, param):
+    def _add_param(self, param: Param) -> None:
         self._params[param.key] = param.value
 
-    def _add_tag(self, tag):
+    def _add_tag(self, tag: RunTag) -> None:
         self._tags[tag.key] = tag.value
 
     def to_proto(self) -> ProtoRunData:

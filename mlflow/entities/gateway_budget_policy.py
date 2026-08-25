@@ -24,16 +24,15 @@ class BudgetDurationUnit(str, Enum):
     MONTHS = "MONTHS"
 
     @classmethod
-    def from_proto(cls, proto: ProtoBudgetDurationUnit) -> BudgetDurationUnit | None:
+    def from_proto(cls, proto: ProtoBudgetDurationUnit.ValueType) -> BudgetDurationUnit | None:
         try:
             return cls(ProtoBudgetDurationUnit.Name(proto))
         except ValueError:
             return None
 
-    def to_proto(self) -> ProtoBudgetDurationUnit:
-        # `EnumTypeWrapper.Value` is untyped upstream; the typed local converts the
-        # resulting `Any` without adding a runtime call.
-        proto_value: ProtoBudgetDurationUnit = ProtoBudgetDurationUnit.Value(self.value)
+    def to_proto(self) -> ProtoBudgetDurationUnit.ValueType:
+        # `EnumTypeWrapper.Value` converts the enum name to its proto integer value.
+        proto_value: ProtoBudgetDurationUnit.ValueType = ProtoBudgetDurationUnit.Value(self.value)
         return proto_value
 
 
@@ -45,16 +44,15 @@ class BudgetTargetScope(str, Enum):
     ENDPOINT = "ENDPOINT"
 
     @classmethod
-    def from_proto(cls, proto: ProtoBudgetTargetScope) -> BudgetTargetScope | None:
+    def from_proto(cls, proto: ProtoBudgetTargetScope.ValueType) -> BudgetTargetScope | None:
         try:
             return cls(ProtoBudgetTargetScope.Name(proto))
         except ValueError:
             return None
 
-    def to_proto(self) -> ProtoBudgetTargetScope:
-        # `EnumTypeWrapper.Value` is untyped upstream; the typed local converts the
-        # resulting `Any` without adding a runtime call.
-        proto_value: ProtoBudgetTargetScope = ProtoBudgetTargetScope.Value(self.value)
+    def to_proto(self) -> ProtoBudgetTargetScope.ValueType:
+        # `EnumTypeWrapper.Value` converts the enum name to its proto integer value.
+        proto_value: ProtoBudgetTargetScope.ValueType = ProtoBudgetTargetScope.Value(self.value)
         return proto_value
 
 
@@ -65,16 +63,15 @@ class BudgetAction(str, Enum):
     REJECT = "REJECT"
 
     @classmethod
-    def from_proto(cls, proto: ProtoBudgetAction) -> BudgetAction | None:
+    def from_proto(cls, proto: ProtoBudgetAction.ValueType) -> BudgetAction | None:
         try:
             return cls(ProtoBudgetAction.Name(proto))
         except ValueError:
             return None
 
-    def to_proto(self) -> ProtoBudgetAction:
-        # `EnumTypeWrapper.Value` is untyped upstream; the typed local converts the
-        # resulting `Any` without adding a runtime call.
-        proto_value: ProtoBudgetAction = ProtoBudgetAction.Value(self.value)
+    def to_proto(self) -> ProtoBudgetAction.ValueType:
+        # `EnumTypeWrapper.Value` converts the enum name to its proto integer value.
+        proto_value: ProtoBudgetAction.ValueType = ProtoBudgetAction.Value(self.value)
         return proto_value
 
 
@@ -84,16 +81,15 @@ class BudgetUnit(str, Enum):
     USD = "USD"
 
     @classmethod
-    def from_proto(cls, proto: ProtoBudgetUnit) -> BudgetUnit | None:
+    def from_proto(cls, proto: ProtoBudgetUnit.ValueType) -> BudgetUnit | None:
         try:
             return cls(ProtoBudgetUnit.Name(proto))
         except ValueError:
             return None
 
-    def to_proto(self) -> ProtoBudgetUnit:
-        # `EnumTypeWrapper.Value` is untyped upstream; the typed local converts the
-        # resulting `Any` without adding a runtime call.
-        proto_value: ProtoBudgetUnit = ProtoBudgetUnit.Value(self.value)
+    def to_proto(self) -> ProtoBudgetUnit.ValueType:
+        # `EnumTypeWrapper.Value` converts the enum name to its proto integer value.
+        proto_value: ProtoBudgetUnit.ValueType = ProtoBudgetUnit.Value(self.value)
         return proto_value
 
 

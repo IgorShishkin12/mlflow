@@ -74,9 +74,8 @@ class DatasetRecordSourceType(str, Enum):
         return DatasetRecordSourceType(parsed)
 
     @classmethod
-    def from_proto(cls, proto_source_type: int) -> str:
-        # `EnumTypeWrapper.Name` is untyped upstream; the typed local converts the
-        # resulting `Any` without adding a runtime call.
+    def from_proto(cls, proto_source_type: ProtoDatasetRecordSource.SourceType.ValueType) -> str:
+        # `EnumTypeWrapper.Name` converts the proto integer value back to its name.
         source_type: str = ProtoDatasetRecordSource.SourceType.Name(proto_source_type)
         return source_type
 
@@ -118,8 +117,12 @@ class DatasetRecordSource(_MlflowObject):
         )
 
         # NB: A str source_type is standardized to the enum in __post_init__, but an unset
-        # proto field passes None, which _standardize does not handle.
-        return cls(source_type=source_type, source_data=source_data)  # type: ignore[arg-type]
+        # proto field passes None, which _standardize does not handle (latent bug; see
+        # MAINTAINER_FINDINGS.md #8). Suppressed pending the behavior fix.
+        return cls(
+            source_type=source_type,  # type: ignore[arg-type]
+            source_data=source_data,
+        )
 
     def to_dict(self) -> dict[str, Any]:
         d = asdict(self)

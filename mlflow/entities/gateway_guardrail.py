@@ -20,13 +20,12 @@ class GuardrailStage(str, Enum):
         return self.value
 
     @classmethod
-    def from_proto(cls, proto: ProtoGuardrailStage) -> GuardrailStage:
+    def from_proto(cls, proto: ProtoGuardrailStage.ValueType) -> GuardrailStage:
         return cls(ProtoGuardrailStage.Name(proto))
 
-    def to_proto(self) -> ProtoGuardrailStage:
-        # `EnumTypeWrapper.Value` is untyped upstream; the typed local converts the
-        # resulting `Any` without adding a runtime call.
-        proto_value: ProtoGuardrailStage = ProtoGuardrailStage.Value(self.value)
+    def to_proto(self) -> ProtoGuardrailStage.ValueType:
+        # `EnumTypeWrapper.Value` converts the enum name to its proto integer value.
+        proto_value: ProtoGuardrailStage.ValueType = ProtoGuardrailStage.Value(self.value)
         return proto_value
 
 
@@ -38,13 +37,12 @@ class GuardrailAction(str, Enum):
         return self.value
 
     @classmethod
-    def from_proto(cls, proto: ProtoGuardrailAction) -> GuardrailAction:
+    def from_proto(cls, proto: ProtoGuardrailAction.ValueType) -> GuardrailAction:
         return cls(ProtoGuardrailAction.Name(proto))
 
-    def to_proto(self) -> ProtoGuardrailAction:
-        # `EnumTypeWrapper.Value` is untyped upstream; the typed local converts the
-        # resulting `Any` without adding a runtime call.
-        proto_value: ProtoGuardrailAction = ProtoGuardrailAction.Value(self.value)
+    def to_proto(self) -> ProtoGuardrailAction.ValueType:
+        # `EnumTypeWrapper.Value` converts the enum name to its proto integer value.
+        proto_value: ProtoGuardrailAction.ValueType = ProtoGuardrailAction.Value(self.value)
         return proto_value
 
 

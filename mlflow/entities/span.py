@@ -112,10 +112,11 @@ class Span:
     # NB: Subclasses store different concrete implementations of these fields: `_span`
     # holds an immutable ReadableSpan here, a recording SDK Span in LiveSpan, and a
     # NonRecordingSpan in NoOpSpan; `_attributes` is an attributes registry here and in
-    # LiveSpan, but a plain dict in NoOpSpan. OpenTelemetry splits these surfaces across
-    # its API/SDK classes with no common base type, hence the loose typing of `_span`.
+    # LiveSpan, but a plain dict placeholder in NoOpSpan. OpenTelemetry splits these
+    # surfaces across its API/SDK classes with no common base type, hence the loose
+    # typing of both fields.
     _span: Any
-    _attributes: "_SpanAttributesRegistry"
+    _attributes: Any
 
     def __init__(self, otel_span: OTelReadableSpan) -> None:
         if not isinstance(otel_span, OTelReadableSpan):
@@ -144,7 +145,7 @@ class Span:
             self._links = []
         else:
             self._links = [
-                Link(  # type: ignore[abstract]
+                Link(
                     trace_id=f"tr-{otel_link.context.trace_id:032x}",
                     span_id=f"{otel_link.context.span_id:016x}",
                     attributes=dict(otel_link.attributes) if otel_link.attributes else None,
@@ -263,7 +264,10 @@ class Span:
         Returns:
             A dictionary of all attributes of the span.
         """
-        return self._attributes.get_all()
+        # Typed local: `_attributes` is loosely typed (see class-level NB), so the
+        # bridge keeps the declared return type honest.
+        all_attributes: dict[str, Any] = self._attributes.get_all()
+        return all_attributes
 
     @property
     def events(self) -> list[SpanEvent]:
@@ -274,7 +278,7 @@ class Span:
             A list of all events of the span.
         """
         return [
-            SpanEvent(  # type: ignore[abstract]
+            SpanEvent(
                 name=event.name,
                 timestamp=event.timestamp,
                 # Convert from OpenTelemetry's BoundedAttributes class to a simple dict
@@ -293,7 +297,7 @@ class Span:
             A list of all links of the span.
         """
         return [
-            Link(  # type: ignore[abstract]
+            Link(
                 trace_id=link.trace_id,
                 span_id=link.span_id,
                 attributes=dict(link.attributes) if link.attributes else None,
@@ -708,7 +712,7 @@ class LiveSpan(Span):
             self._links = []
         else:
             self._links = [
-                Link(  # type: ignore[abstract]
+                Link(
                     trace_id=f"tr-{otel_link.context.trace_id:032x}",
                     span_id=f"{otel_link.context.span_id:016x}",
                     attributes=dict(otel_link.attributes) if otel_link.attributes else None,
@@ -759,7 +763,7 @@ class LiveSpan(Span):
         if extract_base64:
             self._extract_attachments_from_serialized(SpanAttributeKey.OUTPUTS)
 
-    def _extract_attachments_from_serialized(self, attr_key: str):
+    def _extract_attachments_from_serialized(self, attr_key: str) -> None:
         """Re-extract attachments from the serialized attribute value.
 
         Handles cases where the first extraction pass couldn't recurse into
@@ -1097,7 +1101,7 @@ class LiveSpan(Span):
             ) from e
 
         self._links.append(
-            Link(  # type: ignore[abstract]
+            Link(
                 trace_id=link.trace_id,
                 span_id=link.span_id,
                 attributes=dict(link.attributes) if link.attributes else None,
@@ -1198,7 +1202,7 @@ class LiveSpan(Span):
 
     # NB: The missing @classmethod decorator here is pre-existing and intentionally left
     # as-is to avoid behavior changes; it makes this override incompatible with the
-    # classmethod `Span.from_dict`, hence the ignore.
+    # classmethod `Span.from_dict` (adding it belongs on a fix branch).
     def from_dict(cls, data: dict[str, Any]) -> "Span":  # type: ignore[override]
         raise NotImplementedError("The `from_dict` method is not supported for the LiveSpan class.")
 
@@ -1213,7 +1217,7 @@ class LiveSpan(Span):
         # Shallow copies so the immutable span is independent of further LiveSpan mutations
         span._attachments = dict(self._attachments)
         span._links = [
-            Link(  # type: ignore[abstract]
+            Link(
                 trace_id=link.trace_id,
                 span_id=link.span_id,
                 attributes=dict(link.attributes) if link.attributes else None,
@@ -1259,7 +1263,13 @@ class LiveSpan(Span):
         from mlflow.tracing.trace_manager import InMemoryTraceManager
 
         trace_manager = InMemoryTraceManager.get_instance()
-        parent_span = trace_manager.get_span_from_id(trace_id, parent_span_id)
+        # NB: trace_id/parent_span_id are Optional on span fields (root spans carry None);
+        # the manager treats unknown IDs as a miss. Whether the manager contract should
+        # accept Optional IDs is deferred to maintainers (see MAINTAINER_FINDINGS.md #1).
+        parent_span = trace_manager.get_span_from_id(
+            trace_id,
+            parent_span_id,  # type: ignore[arg-type]
+        )
 
         # Create a new span with the same name, parent, and start time
         # NB: provider.start_detached_span returns the created OpenTelemetry span directly;
@@ -1396,12 +1406,18 @@ class NoOpSpan(Span):
 
     def __init__(self, otel_span: OTelSpan | None = None) -> None:
         # NB: OTel stubs require a SpanContext argument; None is accepted at runtime and
-        # simply means "no context" (NoOpSpan never reads it).
+        # simply means "no context" (NoOpSpan never reads it). Stub strictness is
+        # reported in MAINTAINER_FINDINGS.md #7.
         self._span = otel_span or NonRecordingSpan(context=None)  # type: ignore[arg-type]
         # NB: A plain dict placeholder; NoOpSpan never touches the attributes.
-        self._attributes = {}  # type: ignore[assignment]
+        self._attributes = {}
         self._links = []
 
+    # NB: The no-op span has no span data, so the getters below return None at runtime.
+    # They are annotated `Any` rather than the base declarations' concrete types because a
+    # no-op implementation intentionally violates LSP here; annotating them `None` would
+    # require widening every base declaration (and every consumer of a real span) to
+    # handle Optional values that never occur outside NoOpSpan.
     @property
     def trace_id(self) -> str:
         """
@@ -1410,15 +1426,15 @@ class NoOpSpan(Span):
         return NO_OP_SPAN_TRACE_ID
 
     @property
-    def span_id(self) -> None:  # type: ignore[override]
+    def span_id(self) -> Any:
         return None
 
     @property
-    def name(self) -> None:  # type: ignore[override]
+    def name(self) -> Any:
         return None
 
     @property
-    def start_time_ns(self) -> None:  # type: ignore[override]
+    def start_time_ns(self) -> Any:
         return None
 
     @property
@@ -1434,11 +1450,11 @@ class NoOpSpan(Span):
         return None
 
     @property
-    def status(self) -> None:  # type: ignore[override]
+    def status(self) -> Any:
         return None
 
     @property
-    def _trace_id(self):
+    def _trace_id(self) -> Any:
         return None
 
     def set_inputs(self, inputs: dict[str, Any]) -> None:
@@ -1499,7 +1515,7 @@ class _SpanAttributesRegistry:
     def get_all(self) -> dict[str, Any]:
         return {key: self.get(key) for key in self._span.attributes.keys()}
 
-    def get(self, key: str):
+    def get(self, key: str) -> Any | None:
         if serialized_value := self._span.attributes.get(key):
             try:
                 return json.loads(serialized_value)
@@ -1507,8 +1523,9 @@ class _SpanAttributesRegistry:
                 # If failed to deserialize (e.g., string value is directly set to OTel span),
                 # return the original value as is.
                 return serialized_value
+        return None
 
-    def set(self, key: str, value: Any):
+    def set(self, key: str, value: Any) -> None:
         if not isinstance(key, str):
             _logger.warning(f"Attribute key must be a string, but got {type(key)}. Skipping.")
             return
@@ -1532,12 +1549,12 @@ class _CachedSpanAttributesRegistry(_SpanAttributesRegistry):
         super().__init__(otel_span)
         self._cache: dict[str, Any] = {}
 
-    def get(self, key: str):
+    def get(self, key: str) -> Any | None:
         if key not in self._cache:
             self._cache[key] = super().get(key)
         return self._cache[key]
 
-    def set(self, key: str, value: Any):
+    def set(self, key: str, value: Any) -> None:
         raise MlflowException(
             "The attributes of the immutable span must not be updated.", INVALID_PARAMETER_VALUE
         )

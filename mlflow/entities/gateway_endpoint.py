@@ -40,17 +40,16 @@ class RoutingStrategy(str, Enum):
     REQUEST_BASED_TRAFFIC_SPLIT = "REQUEST_BASED_TRAFFIC_SPLIT"
 
     @classmethod
-    def from_proto(cls, proto: ProtoRoutingStrategy) -> RoutingStrategy | None:
+    def from_proto(cls, proto: ProtoRoutingStrategy.ValueType) -> RoutingStrategy | None:
         try:
             return cls(ProtoRoutingStrategy.Name(proto))
         except ValueError:
             # unspecified in proto is treated as None
             return None
 
-    def to_proto(self) -> ProtoRoutingStrategy:
-        # `EnumTypeWrapper.Value` is untyped upstream; the typed local converts the
-        # resulting `Any` without adding a runtime call.
-        proto_value: ProtoRoutingStrategy = ProtoRoutingStrategy.Value(self.value)
+    def to_proto(self) -> ProtoRoutingStrategy.ValueType:
+        # `EnumTypeWrapper.Value` converts the enum name to its proto integer value.
+        proto_value: ProtoRoutingStrategy.ValueType = ProtoRoutingStrategy.Value(self.value)
         return proto_value
 
 
@@ -60,17 +59,16 @@ class FallbackStrategy(str, Enum):
     SEQUENTIAL = "SEQUENTIAL"
 
     @classmethod
-    def from_proto(cls, proto: ProtoFallbackStrategy) -> FallbackStrategy | None:
+    def from_proto(cls, proto: ProtoFallbackStrategy.ValueType) -> FallbackStrategy | None:
         try:
             return cls(ProtoFallbackStrategy.Name(proto))
         except ValueError:
             # unspecified in proto is treated as None
             return None
 
-    def to_proto(self) -> ProtoFallbackStrategy:
-        # `EnumTypeWrapper.Value` is untyped upstream; the typed local converts the
-        # resulting `Any` without adding a runtime call.
-        proto_value: ProtoFallbackStrategy = ProtoFallbackStrategy.Value(self.value)
+    def to_proto(self) -> ProtoFallbackStrategy.ValueType:
+        # `EnumTypeWrapper.Value` converts the enum name to its proto integer value.
+        proto_value: ProtoFallbackStrategy.ValueType = ProtoFallbackStrategy.Value(self.value)
         return proto_value
 
 
@@ -81,17 +79,20 @@ class GatewayModelLinkageType(str, Enum):
     FALLBACK = "FALLBACK"
 
     @classmethod
-    def from_proto(cls, proto: ProtoGatewayModelLinkageType) -> GatewayModelLinkageType | None:
+    def from_proto(
+        cls, proto: ProtoGatewayModelLinkageType.ValueType
+    ) -> GatewayModelLinkageType | None:
         try:
             return cls(ProtoGatewayModelLinkageType.Name(proto))
         except ValueError:
             # unspecified in proto is treated as None
             return None
 
-    def to_proto(self) -> ProtoGatewayModelLinkageType:
-        # `EnumTypeWrapper.Value` is untyped upstream; the typed local converts the
-        # resulting `Any` without adding a runtime call.
-        proto_value: ProtoGatewayModelLinkageType = ProtoGatewayModelLinkageType.Value(self.value)
+    def to_proto(self) -> ProtoGatewayModelLinkageType.ValueType:
+        # `EnumTypeWrapper.Value` converts the enum name to its proto integer value.
+        proto_value: ProtoGatewayModelLinkageType.ValueType = ProtoGatewayModelLinkageType.Value(
+            self.value
+        )
         return proto_value
 
 

@@ -4,7 +4,7 @@ import json
 from dataclasses import dataclass
 from typing import Any, cast
 
-from google.protobuf.json_format import MessageToDict  # type: ignore[import-untyped]
+from google.protobuf.json_format import MessageToDict
 
 from mlflow.entities._mlflow_object import _MlflowObject
 from mlflow.entities.dataset_record_source import DatasetRecordSource, DatasetRecordSourceType
@@ -26,7 +26,8 @@ class DatasetRecord(_MlflowObject):
 
     dataset_id: str
     inputs: dict[str, Any]
-    dataset_record_id: str
+    # Assigned by the backend after creation, so callers may construct records without one.
+    dataset_record_id: str | None
     created_time: int
     last_update_time: int
     outputs: dict[str, Any] | None = None
@@ -59,7 +60,9 @@ class DatasetRecord(_MlflowObject):
     def to_proto(self) -> ProtoDatasetRecord:
         proto = ProtoDatasetRecord()
 
-        proto.dataset_record_id = self.dataset_record_id
+        # Persisted records always carry the backend-assigned ID; the cast narrows the
+        # optional constructor value without altering what is sent.
+        proto.dataset_record_id = cast("str", self.dataset_record_id)
         proto.dataset_id = self.dataset_id
         proto.inputs = json.dumps(self.inputs)
         proto.created_time = self.created_time
